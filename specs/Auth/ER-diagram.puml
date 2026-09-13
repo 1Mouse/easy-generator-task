@@ -1,0 +1,48 @@
+@startuml ER-diagram
+!theme plain
+title Auth + Orders — Entity Relationship Diagram (MongoDB collections)
+
+hide circle
+skinparam linetype ortho
+
+entity "User" as user {
+  * _id : ObjectId <<PK>>
+  --
+  * email : string <<unique, lowercase, trim, indexed>>
+  * name : string
+  * passwordHash : string
+  * createdAt : Date
+  * updatedAt : Date
+}
+
+entity "Order" as order {
+  * _id : ObjectId <<PK>>
+  --
+  * id : string <<unique, indexed>>
+  * customerName : string
+  * status : string <<enum: New, Picking, Delivering, Delivered>> <<indexed>>
+  * items : string[]
+  * createdAt : string <<ISO date string>>
+}
+
+note right of user
+  Collection: "users"
+  Password is never stored or
+  returned in plaintext — only
+  a bcrypt hash (passwordHash).
+end note
+
+note right of order
+  Collection: "orders"
+  Seeded from the same generator
+  logic as apps/web's mock-orders.ts
+  (118 deterministic records).
+  No direct FK to User: orders are
+  not owned by a specific signed-up
+  user in this task's scope — any
+  authenticated user may list them.
+end note
+
+user ..> order : "authenticated access\n(no ownership FK)"
+
+@enduml

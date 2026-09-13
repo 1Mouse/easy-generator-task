@@ -1,0 +1,79 @@
+@startuml sequence-diagram
+!theme plain
+title Auth + Protected Orders — Sequence Diagram
+
+actor Client
+participant "AuthController" as AuthCtrl
+participant "AuthService" as AuthSvc
+participant "UsersService" as UsersSvc
+database "MongoDB\n(users)" as UsersDB
+participant "JwtService" as Jwt
+participant "JwtAuthGuard\n+ JwtStrategy" as Guard
+participant "OrdersController" as OrdersCtrl
+participant "OrdersService" as OrdersSvc
+database "MongoDB\n(orders)" as OrdersDB
+participant "HealthController" as HealthCtrl
+
+== Sign Up ==
+Client -> AuthCtrl : POST /api/auth/signup\n{ email, name, password }
+AuthCtrl -> AuthCtrl : ValidationPipe\n(class-validator DTO)
+AuthCtrl -> AuthSvc : signUp(dto)
+AuthSvc -> UsersSvc : findByEmail(email)
+UsersSvc -> UsersDB : findOne({ email })
+UsersDB --> UsersSvc : null
+UsersSvc --> AuthSvc : null
+AuthSvc -> AuthSvc : bcryptjs.hash(password)
+AuthSvc -> UsersSvc : create({ email, name, passwordHash })
+UsersSvc -> UsersDB : insertOne(user)
+UsersDB --> UsersSvc : user
+UsersSvc --> AuthSvc : user
+AuthSvc -> Jwt : sign({ sub: user.id, email })
+Jwt --> AuthSvc : accessToken
+AuthSvc --> AuthCtrl : { accessToken }
+AuthCtrl --> Client : 201 Created\n{ accessToken }
+
+== Sign In ==
+Client -> AuthCtrl : POST /api/auth/signin\n{ email, password }
+AuthCtrl -> AuthSvc : signIn(dto)
+AuthSvc -> UsersSvc : findByEmail(email)
+UsersSvc -> UsersDB : findOne({ email })
+UsersDB --> UsersSvc : user
+UsersSvc --> AuthSvc : user
+AuthSvc -> AuthSvc : bcryptjs.compare(password, user.passwordHash)
+alt password matches
+  AuthSvc -> Jwt : sign({ sub: user.id, email })
+  Jwt --> AuthSvc : accessToken
+  AuthSvc --> AuthCtrl : { accessToken }
+  AuthCtrl --> Client : 200 OK\n{ accessToken }
+else password mismatch or user not found
+  AuthSvc --> AuthCtrl : throws UnauthorizedException
+  AuthCtrl --> Client : 401 Unauthorized
+end
+
+== Authenticated request to a protected endpoint ==
+Client -> OrdersCtrl : GET /api/orders?page=1&pageSize=10\nAuthorization: Bearer <accessToken>
+OrdersCtrl -> Guard : canActivate()
+Guard -> Guard : extract Bearer token
+Guard -> Jwt : verify(token)
+alt token valid
+  Jwt --> Guard : payload { sub, email }
+  Guard -> Guard : attach req.user = payload
+  Guard --> OrdersCtrl : allow
+  OrdersCtrl -> OrdersSvc : list(query)
+  OrdersSvc -> OrdersDB : find(filter).sort().skip().limit()
+  OrdersDB --> OrdersSvc : documents
+  OrdersSvc -> OrdersDB : countDocuments(filter)
+  OrdersDB --> OrdersSvc : total
+  OrdersSvc --> OrdersCtrl : { data, total, page, pageSize, totalPages }
+  OrdersCtrl --> Client : 200 OK\n{ data, total, page, pageSize, totalPages }
+else token missing / invalid / expired
+  Jwt --> Guard : throws
+  Guard --> OrdersCtrl : deny
+  OrdersCtrl --> Client : 401 Unauthorized
+end
+
+== Public, non-protected endpoint ==
+Client -> HealthCtrl : GET /api/health\n(no Authorization header)
+HealthCtrl --> Client : 200 OK\n{ status: "ok" }
+
+@enduml

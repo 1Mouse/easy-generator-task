@@ -1,0 +1,15 @@
+meta {
+  name: List Orders - No Token
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/orders
+  body: none
+  auth: none
+}
+
+docs {
+  Expected: 401 Unauthorized — no Authorization header sent.
+}

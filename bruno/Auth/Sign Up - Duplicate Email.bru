@@ -1,0 +1,23 @@
+meta {
+  name: Sign Up - Duplicate Email
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/auth/signup
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "{{signUpEmail}}",
+    "name": "{{signUpName}}",
+    "password": "{{signUpPassword}}"
+  }
+}
+
+docs {
+  Run "Sign Up" first, then run this — expected: 409 Conflict.
+}

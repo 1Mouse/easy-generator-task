@@ -1,0 +1,23 @@
+meta {
+  name: Sign Up - Invalid Email
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/auth/signup
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "not-an-email",
+    "name": "Bad Email",
+    "password": "Str0ng!Pass"
+  }
+}
+
+docs {
+  Expected: 400 — email is not a valid email address.
+}

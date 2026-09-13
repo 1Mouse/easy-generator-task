@@ -1,0 +1,32 @@
+{
+  "name": "order-listing",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:watch": "turbo run test:watch --filter=web",
+    "test:integration": "turbo run test:integration --filter=api",
+    "test:e2e": "turbo run test:e2e --filter=web",
+    "test:e2e:ui": "turbo run test:e2e:ui --filter=web",
+    "test:e2e:api": "turbo run test:e2e --filter=api",
+    "seed": "turbo run seed --filter=api"
+  },
+  "devDependencies": {
+    "@workspace/eslint-config": "workspace:*",
+    "@workspace/typescript-config": "workspace:*",
+    "lefthook": "^2.1.4",
+    "prettier": "^3.8.1",
+    "prettier-plugin-tailwindcss": "^0.7.2",
+    "turbo": "^2.8.17",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  }
+}

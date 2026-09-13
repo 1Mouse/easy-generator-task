@@ -1,0 +1,35 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": [
+        "MONGODB_URI",
+        "JWT_SECRET",
+        "JWT_EXPIRES_IN",
+        "PORT",
+        "CORS_ORIGIN"
+      ]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "test:integration": {
+      "dependsOn": ["transit"]
+    },
+    "test:e2e": {
+      "dependsOn": ["transit"],
+      "cache": false
+    },
+    "seed": {
+      "cache": false,
+      "env": ["MONGODB_URI"]
+    }
+  }
+}

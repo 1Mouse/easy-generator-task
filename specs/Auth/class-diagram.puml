@@ -1,0 +1,146 @@
+@startuml class-diagram
+!theme plain
+title Auth + Orders — NestJS Class Diagram
+skinparam classAttributeIconSize 0
+left to right direction
+
+package "auth" {
+  class AuthController {
+    +signUp(dto: SignUpDto): Promise<{accessToken}>
+    +signIn(dto: SignInDto): Promise<{accessToken}>
+    +me(user: CurrentUser): Promise<UserProfile>
+  }
+
+  class AuthService {
+    -usersService: UsersService
+    -jwtService: JwtService
+    +signUp(dto: SignUpDto): Promise<{accessToken}>
+    +signIn(dto: SignInDto): Promise<{accessToken}>
+    -hashPassword(plain: string): Promise<string>
+    -comparePassword(plain: string, hash: string): Promise<boolean>
+  }
+
+  class SignUpDto {
+    +email: string
+    +name: string
+    +password: string
+  }
+
+  class SignInDto {
+    +email: string
+    +password: string
+  }
+
+  class JwtStrategy {
+    +validate(payload: JwtPayload): {userId, email}
+  }
+
+  class JwtAuthGuard {
+    +canActivate(context): boolean
+  }
+
+  class AuthModule
+}
+
+package "users" {
+  class UsersService {
+    -userModel: Model<UserDocument>
+    +findByEmail(email: string): Promise<UserDocument | null>
+    +create(data): Promise<UserDocument>
+  }
+
+  class UserSchema {
+    +email: string
+    +name: string
+    +passwordHash: string
+  }
+
+  class UsersModule
+}
+
+package "orders" {
+  class OrdersController {
+    +list(query: ListOrdersQueryDto): Promise<PaginatedResponse<Order>>
+  }
+
+  class OrdersService {
+    -orderModel: Model<OrderDocument>
+    +list(query: OrderListQuery): Promise<PaginatedResponse<Order>>
+  }
+
+  class ListOrdersQueryDto {
+    +page: number
+    +pageSize: number
+    +status: string
+    +search: string
+    +sort: "asc" | "desc"
+  }
+
+  class OrderSchema {
+    +id: string
+    +customerName: string
+    +status: string
+    +items: string[]
+    +createdAt: string
+  }
+
+  class OrdersModule
+}
+
+package "health" {
+  class HealthController {
+    +check(): {status: string}
+  }
+}
+
+package "common" {
+  class HttpExceptionFilter {
+    +catch(exception, host): void
+  }
+
+  class LoggingInterceptor {
+    +intercept(context, next): Observable
+  }
+
+  class CurrentUserDecorator <<decorator>> {
+    +CurrentUser()
+  }
+}
+
+class AppModule
+
+AppModule --> AuthModule
+AppModule --> UsersModule
+AppModule --> OrdersModule
+AppModule --> HealthController
+
+AuthModule --> AuthController
+AuthModule --> AuthService
+AuthModule --> JwtStrategy
+AuthModule --> JwtAuthGuard
+AuthModule ..> UsersModule : imports
+
+AuthController --> SignUpDto
+AuthController --> SignInDto
+AuthController --> AuthService
+AuthController ..> CurrentUserDecorator
+
+AuthService --> UsersService
+JwtStrategy ..> UsersService : validates against
+
+UsersModule --> UsersService
+UsersService --> UserSchema
+
+OrdersModule --> OrdersController
+OrdersModule --> OrdersService
+OrdersController --> ListOrdersQueryDto
+OrdersController --> OrdersService
+OrdersController ..> JwtAuthGuard : @UseGuards
+OrdersService --> OrderSchema
+
+HealthController ..> AppModule : public, no guard
+
+AppModule ..> HttpExceptionFilter : global filter
+AppModule ..> LoggingInterceptor : global interceptor
+
+@enduml

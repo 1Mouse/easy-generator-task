@@ -1,0 +1,26 @@
+meta {
+  name: Sign In
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/api/auth/signin
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "{{signUpEmail}}",
+    "password": "{{signUpPassword}}"
+  }
+}
+
+script:post-response {
+  const body = res.getBody();
+
+  if (body?.accessToken) {
+    bru.setEnvVar("accessToken", body.accessToken);
+  }
+}

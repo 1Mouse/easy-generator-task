@@ -1,0 +1,21 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format check
+      run: pnpm exec prettier --check {staged_files}
+      glob: "*.{ts,tsx,js,jsx,css,json,yaml,yml,md}"
+
+    - name: lint
+      tags: [code]
+      glob: "*.{ts,tsx,js,jsx}"
+      run: pnpm lint
+
+pre-push:
+  jobs:
+    - name: typecheck
+      tags: [slow]
+      run: pnpm typecheck
+
+    - name: test
+      tags: [slow]
+      run: pnpm test

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "tui",
+  "tasks": {
+    "transit": {
+      "dependsOn": ["^transit"]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "env": ["NEXT_PUBLIC_APP_URL"],
+      "inputs": ["$TURBO_DEFAULT$", ".env*"],
+      "outputs": [".next/**", "!.next/cache/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"]
+    },
+    "format": {
+      "dependsOn": ["^format"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "test": {
+      "dependsOn": ["transit"]
+    },
+    "test:integration": {
+      "dependsOn": ["transit"]
+    },
+    "test:watch": {
+      "cache": false,
+      "persistent": true
+    },
+    "test:e2e": {
+      "cache": false,
+      "env": ["CI", "PLAYWRIGHT_BASE_URL", "PORT"],
+      "dependsOn": ["transit"]
+    },
+    "test:e2e:ui": {
+      "cache": false,
+      "env": ["CI", "PLAYWRIGHT_BASE_URL", "PORT"],
+      "persistent": true,
+      "dependsOn": ["transit"]
+    },
+    "dev": {
+      "cache": false,
+      "env": ["NEXT_PUBLIC_APP_URL"],
+      "persistent": true
+    }
+  }
+}

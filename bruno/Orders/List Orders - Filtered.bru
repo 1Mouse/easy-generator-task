@@ -1,0 +1,21 @@
+meta {
+  name: List Orders - Filtered
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/orders?status=Delivered&search=alice&sort=asc
+  body: none
+  auth: bearer
+}
+
+params:query {
+  status: Delivered
+  search: alice
+  sort: asc
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
