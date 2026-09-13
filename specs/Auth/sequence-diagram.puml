@@ -5,10 +5,17 @@ title Auth + Protected Orders — Sequence Diagram
 actor Client
 participant "AuthController" as AuthCtrl
 participant "AuthService" as AuthSvc
+participant "EmailVerificationService" as EmailVerifSvc
+participant "RefreshTokenService" as RefreshSvc
+participant "MailService" as MailSvc
+participant "Mailpit\n(SMTP)" as Mailpit
 participant "UsersService" as UsersSvc
 database "MongoDB\n(users)" as UsersDB
+database "MongoDB\n(emailVerificationTokens)" as TokenDB
+database "MongoDB\n(refreshTokens)" as RefreshDB
 participant "JwtService" as Jwt
 participant "JwtAuthGuard\n+ JwtStrategy" as Guard
+participant "JwtRefreshGuard\n+ JwtRefreshStrategy" as RefreshGuard
 participant "OrdersController" as OrdersCtrl
 participant "OrdersService" as OrdersSvc
 database "MongoDB\n(orders)" as OrdersDB
@@ -24,13 +31,18 @@ UsersDB --> UsersSvc : null
 UsersSvc --> AuthSvc : null
 AuthSvc -> AuthSvc : bcryptjs.hash(password)
 AuthSvc -> UsersSvc : create({ email, name, passwordHash })
-UsersSvc -> UsersDB : insertOne(user)
+UsersSvc -> UsersDB : insertOne(user)\nemailVerifiedAt: null
 UsersDB --> UsersSvc : user
 UsersSvc --> AuthSvc : user
-AuthSvc -> Jwt : sign({ sub: user.id, email })
-Jwt --> AuthSvc : accessToken
-AuthSvc --> AuthCtrl : { accessToken }
-AuthCtrl --> Client : 201 Created\n{ accessToken }
+AuthSvc -> EmailVerifSvc : createAndSendToken({ id, email })
+EmailVerifSvc -> EmailVerifSvc : generate raw token\n(crypto.randomBytes)
+EmailVerifSvc -> EmailVerifSvc : hash token (SHA-256)
+EmailVerifSvc -> TokenDB : insertOne({ userId, tokenHash, expiresAt })
+EmailVerifSvc -> MailSvc : sendMail({ to, subject, text with\n?token=<raw> link })
+MailSvc -> Mailpit : SMTP send
+EmailVerifSvc --> AuthSvc : (void)
+AuthSvc --> AuthCtrl : { user, message }
+AuthCtrl --> Client : 201 Created\n{ user, message }\n(no accessToken)
 
 == Sign In ==
 Client -> AuthCtrl : POST /api/auth/signin\n{ email, password }
@@ -40,15 +52,117 @@ UsersSvc -> UsersDB : findOne({ email })
 UsersDB --> UsersSvc : user
 UsersSvc --> AuthSvc : user
 AuthSvc -> AuthSvc : bcryptjs.compare(password, user.passwordHash)
-alt password matches
-  AuthSvc -> Jwt : sign({ sub: user.id, email })
-  Jwt --> AuthSvc : accessToken
-  AuthSvc --> AuthCtrl : { accessToken }
-  AuthCtrl --> Client : 200 OK\n{ accessToken }
-else password mismatch or user not found
+alt password mismatch or user not found
   AuthSvc --> AuthCtrl : throws UnauthorizedException
   AuthCtrl --> Client : 401 Unauthorized
+else password matches but emailVerifiedAt is null
+  AuthSvc --> AuthCtrl : throws ForbiddenException\n{ code: EMAIL_NOT_VERIFIED }
+  AuthCtrl --> Client : 403 Forbidden\n{ code: EMAIL_NOT_VERIFIED }
+else password matches and email verified
+  AuthSvc -> AuthSvc : createSession(user)
+  AuthSvc -> Jwt : signAsync({ sub, email })\n(access secret, 15m)
+  Jwt --> AuthSvc : accessToken
+  AuthSvc -> RefreshSvc : issue({ id, email })
+  RefreshSvc -> Jwt : signAsync({ sub, email, jti })\n(refresh secret, 30d)
+  Jwt --> RefreshSvc : refreshToken
+  RefreshSvc -> RefreshDB : insertOne({ userId,\ntokenHash: SHA-256(jwt), expiresAt })
+  RefreshSvc --> AuthSvc : refreshToken
+  AuthSvc --> AuthCtrl : { user, accessToken, refreshToken }
+  AuthCtrl --> Client : 200 OK\n{ user, accessToken, refreshToken }
 end
+
+== Verify Email ==
+Client -> AuthCtrl : POST /api/auth/verify-email\n{ token: <raw token from email> }
+AuthCtrl -> AuthSvc : verifyEmail(dto)
+AuthSvc -> EmailVerifSvc : consumeToken(rawToken)
+EmailVerifSvc -> EmailVerifSvc : hash token (SHA-256)
+EmailVerifSvc -> TokenDB : findOne({ tokenHash,\nusedAt: null, expiresAt: {$gt: now} })
+alt active token found
+  TokenDB --> EmailVerifSvc : token doc
+  EmailVerifSvc -> TokenDB : usedAt = now (save)
+  EmailVerifSvc --> AuthSvc : { userId }
+  AuthSvc -> UsersSvc : markEmailVerified(userId)
+  UsersSvc -> UsersDB : findByIdAndUpdate\n(emailVerifiedAt: now)
+  UsersDB --> UsersSvc : user
+  UsersSvc --> AuthSvc : user
+  AuthSvc -> AuthSvc : createSession(user)\n(access JWT + stored refresh JWT,\nsame as Sign In)
+  AuthSvc --> AuthCtrl : { user, accessToken, refreshToken }
+  AuthCtrl --> Client : 200 OK\n{ user, accessToken, refreshToken }\n(auto sign-in)
+else token missing / used / expired
+  TokenDB --> EmailVerifSvc : null
+  EmailVerifSvc --> AuthSvc : throws UnauthorizedException\n{ code: INVALID_EMAIL_VERIFICATION_TOKEN }
+  AuthSvc --> AuthCtrl : (propagates)
+  AuthCtrl --> Client : 401 Unauthorized\n{ code: INVALID_EMAIL_VERIFICATION_TOKEN }
+end
+
+== Refresh (token rotation) ==
+Client -> RefreshGuard : POST /api/auth/refresh\n{ refreshToken }
+RefreshGuard -> RefreshGuard : extract token from body field
+RefreshGuard -> Jwt : verify(token, refresh secret)
+alt signature/expiry invalid
+  Jwt --> RefreshGuard : throws
+  RefreshGuard --> Client : 401 Unauthorized
+else JWT valid
+  Jwt --> RefreshGuard : payload { sub, email, jti }
+  RefreshGuard -> AuthCtrl : allow\n(req.user = { userId, email, refreshToken })
+  AuthCtrl -> AuthSvc : refresh(userId, refreshToken)
+  AuthSvc -> RefreshSvc : consume(userId, token)
+  RefreshSvc -> RefreshDB : findOne({ userId, tokenHash,\nrevokedAt: null, expiresAt: {$gt: now} })
+  alt stored, unrevoked, unexpired
+    RefreshDB --> RefreshSvc : token doc
+    RefreshSvc -> RefreshDB : revokedAt = now (save)
+    RefreshSvc --> AuthSvc : ok
+    AuthSvc -> UsersSvc : findById(userId)
+    UsersSvc -> UsersDB : findById
+    UsersDB --> UsersSvc : user
+    UsersSvc --> AuthSvc : user
+    AuthSvc -> AuthSvc : createSession(user)\n(new access + new stored refresh)
+    AuthSvc --> AuthCtrl : { user, accessToken, refreshToken }
+    AuthCtrl --> Client : 200 OK\n{ user, accessToken, refreshToken }
+  else already rotated / revoked / unknown
+    RefreshDB --> RefreshSvc : null
+    RefreshSvc --> AuthSvc : throws UnauthorizedException\n{ code: INVALID_REFRESH_TOKEN }
+    AuthSvc --> AuthCtrl : (propagates)
+    AuthCtrl --> Client : 401 Unauthorized\n{ code: INVALID_REFRESH_TOKEN }
+  end
+end
+
+== Logout ==
+Client -> RefreshGuard : POST /api/auth/logout\n{ refreshToken }
+RefreshGuard -> Jwt : verify(token, refresh secret)
+Jwt --> RefreshGuard : payload
+RefreshGuard -> AuthCtrl : allow
+AuthCtrl -> AuthSvc : logout(dto)
+AuthSvc -> RefreshSvc : revoke(token)
+RefreshSvc -> RefreshDB : updateOne({ tokenHash },\n{ revokedAt: now })
+AuthSvc --> AuthCtrl : { message }
+AuthCtrl --> Client : 200 OK\n{ message }
+note right of Client
+  Deliberate trade-off: the access token is
+  a stateless JWT, never checked against the
+  DB, so logout cannot revoke it — it stays
+  valid until it expires (default 5m).
+  Logout stops the session being *extended*;
+  clients must discard both tokens.
+end note
+
+== Resend Verification Email ==
+Client -> AuthCtrl : POST /api/auth/resend-verification-email\n{ email }
+AuthCtrl -> AuthSvc : resendVerificationEmail(dto)
+AuthSvc -> UsersSvc : findByEmail(email)
+UsersSvc -> UsersDB : findOne({ email })
+UsersDB --> UsersSvc : user or null
+UsersSvc --> AuthSvc : user or null
+alt user exists and is unverified
+  AuthSvc -> EmailVerifSvc : createAndSendToken({ id, email })
+  EmailVerifSvc -> TokenDB : insertOne(new token)
+  EmailVerifSvc -> MailSvc : sendMail(...)
+  MailSvc -> Mailpit : SMTP send
+else user does not exist, or already verified
+  note right of AuthSvc : no email sent —\nsame response either way
+end
+AuthSvc --> AuthCtrl : { message: generic }
+AuthCtrl --> Client : 200 OK\n{ message: generic }\n(identical in every case — anti-enumeration)
 
 == Authenticated request to a protected endpoint ==
 Client -> OrdersCtrl : GET /api/orders?page=1&pageSize=10\nAuthorization: Bearer <accessToken>

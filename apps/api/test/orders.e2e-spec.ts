@@ -4,7 +4,7 @@ import { Test } from "@nestjs/testing"
 import { MongoMemoryServer } from "mongodb-memory-server"
 import mongoose, { Model } from "mongoose"
 import request from "supertest"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 describe("Orders (e2e)", () => {
   let app: INestApplication
@@ -14,14 +14,21 @@ describe("Orders (e2e)", () => {
   beforeAll(async () => {
     mongod = await MongoMemoryServer.create()
     process.env.MONGODB_URI = mongod.getUri()
-    process.env.JWT_SECRET ??= "test-secret"
+    process.env.JWT_ACCESS_SECRET ??= "test-access-secret"
+    process.env.JWT_REFRESH_SECRET ??= "test-refresh-secret"
 
     const { AppModule } = await import("../src/app.module.js")
     const { Order } = await import("../src/orders/schemas/order.schema.js")
+    const { MailService } = await import("../src/mail/mail.service.js")
+
+    const mockMailService = { sendMail: vi.fn().mockResolvedValue(undefined) }
 
     const moduleFixture = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile()
+    })
+      .overrideProvider(MailService)
+      .useValue(mockMailService)
+      .compile()
     app = moduleFixture.createNestApplication()
     app.setGlobalPrefix("api")
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }))
@@ -54,14 +61,24 @@ describe("Orders (e2e)", () => {
       },
     ])
 
-    const signUp = await request(app.getHttpServer())
-      .post("/api/auth/signup")
-      .send({
-        email: "orders-user@example.com",
-        name: "Orders User",
-        password: "Str0ng!Pass",
-      })
-    accessToken = signUp.body.accessToken
+    const ordersUserEmail = "orders-user@example.com"
+    await request(app.getHttpServer()).post("/api/auth/signup").send({
+      email: ordersUserEmail,
+      name: "Orders User",
+      password: "Str0ng!Pass",
+    })
+
+    const calls = mockMailService.sendMail.mock.calls as [
+      { to: string; text: string },
+    ][]
+    const sentCall = calls.find(([arg]) => arg.to === ordersUserEmail)
+    const verificationToken =
+      sentCall?.[0].text.match(/[?&]token=([^&\s]+)/)?.[1]
+
+    const verifyEmail = await request(app.getHttpServer())
+      .post("/api/auth/verify-email")
+      .send({ token: verificationToken })
+    accessToken = verifyEmail.body.accessToken
   })
 
   afterAll(async () => {

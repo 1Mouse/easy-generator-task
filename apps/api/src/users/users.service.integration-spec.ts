@@ -33,6 +33,7 @@ describe("UsersService (integration)", () => {
       passwordHash: "hashed",
     })
     expect(created.email).toBe("jane@example.com") // lowercased by the schema
+    expect(created.emailVerifiedAt).toBeNull()
 
     const found = await usersService.findByEmail("jane@example.com")
     expect(found?.name).toBe("Jane Doe")
@@ -52,5 +53,18 @@ describe("UsersService (integration)", () => {
 
     const found = await usersService.findById(created.id as string)
     expect(found?.email).toBe("bob@example.com")
+  })
+
+  it("marks a user's email as verified", async () => {
+    const created = await usersService.create({
+      email: "carol@example.com",
+      name: "Carol",
+      passwordHash: "hashed",
+    })
+    expect(created.emailVerifiedAt).toBeNull()
+
+    const verified = await usersService.markEmailVerified(created.id as string)
+
+    expect(verified?.emailVerifiedAt).toBeInstanceOf(Date)
   })
 })

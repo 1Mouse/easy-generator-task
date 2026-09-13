@@ -144,40 +144,49 @@ pnpm typecheck     # TypeScript strict mode
 
 ## Backend API (`apps/api`)
 
-A NestJS + MongoDB backend providing authentication (sign up / sign in / JWT) and a protected, paginated orders endpoint. See `specs/Auth/initial-plan.md` for the full design (ER diagram, sequence diagram, class diagram — all under `specs/Auth/*.puml`).
+A NestJS + MongoDB backend providing authentication with email verification (sign up → verify via emailed link → sign in → JWT) and a protected, paginated orders endpoint. Mail is sent over SMTP to [Mailpit](https://github.com/axllent/mailpit) locally (a fake mailbox with a web inbox — nothing is ever really emailed). See `specs/Auth/initial-plan.md` for the full design (ER diagram, sequence diagram, class diagram — all under `specs/Auth/*.puml`).
 
 ### Running it
 
 ```bash
-# 1. Start MongoDB (Docker required)
-docker compose up -d
-
-# 2. Configure env vars
-cp apps/api/.env.example apps/api/.env
-
-# 3. Install deps (from repo root, if not already done)
-pnpm install
-
-# 4. Seed the orders collection (118 records matching the frontend's mock data)
-pnpm --filter api seed
-
-# 5. Run the API
-pnpm --filter api dev
-# → http://localhost:3001/api        (REST endpoints, prefixed with /api)
-# → http://localhost:3001/api/docs   (Swagger UI)
+podman compose up -d --build   # full stack: api + mongo:8.0 + mailpit
+pnpm --filter api seed         # populate the orders collection
+# → http://localhost:5000/api        (REST endpoints, prefixed with /api)
+# → http://localhost:5000/api/docs   (Swagger UI)
+# → http://localhost:8025            (Mailpit inbox — read verification emails here)
 ```
+
+Podman is the primary tool this repo is set up for (Docker works too — see below). For the fast-iteration workflow (containers for dependencies only, API running on the host with hot reload), the full container build/`Containerfile` design rationale, `.containerignore` vs `.dockerignore`, and Docker-equivalent commands, see **[`dev-guide/setup/containers.md`](dev-guide/setup/containers.md)**.
 
 ### Endpoints
 
-| Method | Path               | Auth       | Description                          |
-| ------ | ------------------ | ---------- | ------------------------------------ |
-| POST   | `/api/auth/signup` | Public     | Create an account, returns a JWT     |
-| POST   | `/api/auth/signin` | Public     | Sign in, returns a JWT               |
-| GET    | `/api/auth/me`     | Bearer JWT | Current authenticated user           |
-| GET    | `/api/orders`      | Bearer JWT | Paginated/filterable/sortable orders |
-| GET    | `/api/health`      | Public     | Liveness check                       |
+| Method | Path                                  | Auth          | Description                                                                        |
+| ------ | ------------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
+| POST   | `/api/auth/signup`                    | Public        | Create an account (unverified), sends a verification email — **returns no tokens** |
+| POST   | `/api/auth/verify-email`              | Public        | Verify with the emailed token — activates the account and **starts a session**     |
+| POST   | `/api/auth/resend-verification-email` | Public        | Resend the verification email (always returns the same generic message)            |
+| POST   | `/api/auth/signin`                    | Public        | Sign in — **403 `EMAIL_NOT_VERIFIED` until verified**                              |
+| POST   | `/api/auth/refresh`                   | Refresh token | Rotate: exchange a refresh token for a brand new access/refresh pair               |
+| POST   | `/api/auth/logout`                    | Refresh token | Revoke the presented refresh token                                                 |
+| GET    | `/api/auth/me`                        | Bearer JWT    | Current authenticated user                                                         |
+| GET    | `/api/orders`                         | Bearer JWT    | Paginated/filterable/sortable orders                                               |
+| GET    | `/api/health`                         | Public        | Liveness check                                                                     |
 
-Sign-up validation: email format, name ≥ 3 chars, password ≥ 8 chars with at least one letter, one digit, and one special character — enforced via `class-validator` DTOs.
+**Session payload.** `signin`, `verify-email`, and `refresh` all return the same shape, so the frontend can store the session and render the user's name without a follow-up request:
+
+```jsonc
+{
+  "user": { "id": "…", "email": "jane@example.com", "name": "Jane Doe" },
+  "accessToken": "…", // short-lived (JWT_ACCESS_EXPIRES_IN, default 5m) — send as `Authorization: Bearer`
+  "refreshToken": "…", // long-lived (JWT_REFRESH_EXPIRES_IN, default 30d) — POST to /api/auth/refresh
+}
+```
+
+**Token design.** Access and refresh tokens are separate JWTs signed with **separate secrets**, so one can never be used in the other's place. Refresh tokens are additionally persisted as a SHA-256 hash in a `refreshTokens` collection, which makes them revocable and lets `/api/auth/refresh` do **rotation**: the presented token is consumed (revoked) and a new pair issued, so a stolen token stops working the moment the legitimate client next refreshes. Replaying a rotated or logged-out token returns `401 INVALID_REFRESH_TOKEN`.
+
+**What logout does and doesn't do.** Logout revokes the refresh token, so the session can't be extended. The access token is intentionally left **stateless** — validating it never touches the database, which keeps every authenticated request free of a DB round trip. The trade-off is that an access token issued before logout stays valid until it expires on its own; the TTL is deliberately short (`5m`) to bound that window, and **clients must discard both tokens on logout** so it's never sent again. If you ever need instant server-side revocation instead, the shape to add is a `sid` claim on the access token checked against its `refreshTokens` row — at the cost of one indexed lookup per request.
+
+Sign-up validation: email format, name ≥ 3 chars, password ≥ 8 chars with at least one letter, one digit, and one special character — enforced via `class-validator` DTOs. Email-verification tokens are single-use, opaque (not JWTs), SHA-256-hashed at rest, and expire after `EMAIL_VERIFICATION_EXPIRES_IN_SECONDS` (default 24h).
 
 ### Testing it manually — Bruno
 
@@ -188,7 +197,9 @@ cd bruno
 bru run --env Local
 ```
 
-Run "Sign Up" or "Sign In" first — their `post-response` scripts capture `accessToken` into the environment for the protected requests.
+`baseUrl` is a collection variable (`bruno/collection.bru`), so individual requests work even without selecting an environment; `--env Local` is still needed for the auth flow's test inputs (`signUpEmail`, etc.) and for `accessToken`/`refreshToken`/`verificationToken`, which the request scripts populate at runtime.
+
+Run "Sign Up", then open Mailpit at `http://localhost:8025`, copy the token out of the verification link, paste it into the `verificationToken` environment variable, then run "Verify Email" — its `post-response` script captures both `accessToken` and `refreshToken` into the environment, so "Me", "List Orders", "Refresh", and "Logout" all work straight afterwards. (The verification token is the one thing that can't be script-captured, since it only ever exists inside an email.) "Refresh" re-captures the rotated pair each time it runs.
 
 ### Automated tests
 
@@ -198,7 +209,7 @@ pnpm --filter api test:integration  # real Mongoose + Nest DI against mongodb-me
 pnpm --filter api test:e2e          # full HTTP flow (supertest) against mongodb-memory-server
 ```
 
-All three tiers are hermetic — `mongodb-memory-server` spins up its own ephemeral MongoDB, no running Docker container required to run the tests.
+All three tiers are hermetic — `mongodb-memory-server` spins up its own ephemeral MongoDB and `MailService` is mocked (the raw verification token is captured straight from the mock's call arguments), so no live Mongo, Mailpit, or Podman is needed to run the suite.
 
 ## Test Suite
 

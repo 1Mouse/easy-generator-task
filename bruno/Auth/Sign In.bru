@@ -1,7 +1,7 @@
 meta {
   name: Sign In
   type: http
-  seq: 5
+  seq: 7
 }
 
 post {
@@ -22,5 +22,9 @@ script:post-response {
 
   if (body?.accessToken) {
     bru.setEnvVar("accessToken", body.accessToken);
+  }
+
+  if (body?.refreshToken) {
+    bru.setEnvVar("refreshToken", body.refreshToken);
   }
 }

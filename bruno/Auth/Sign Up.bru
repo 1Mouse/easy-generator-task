@@ -18,10 +18,10 @@ body:json {
   }
 }
 
-script:post-response {
-  const body = res.getBody();
-
-  if (body?.accessToken) {
-    bru.setEnvVar("accessToken", body.accessToken);
-  }
+docs {
+  Signup no longer returns an accessToken — it creates an unverified
+  account and sends a verification email. Check Mailpit's inbox UI at
+  http://localhost:8025, copy the token from the link in the email into
+  the `verificationToken` environment variable, then run "Verify Email"
+  to activate the account and receive an accessToken.
 }

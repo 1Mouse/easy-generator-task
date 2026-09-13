@@ -19,6 +19,10 @@ export class User {
 
   @Prop({ required: true })
   passwordHash!: string
+
+  // null = not verified; a Date = verified at that time.
+  @Prop({ type: Date, default: null })
+  emailVerifiedAt!: Date | null
 }
 
 export const UserSchema = SchemaFactory.createForClass(User)

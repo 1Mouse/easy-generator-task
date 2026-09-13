@@ -130,3 +130,276 @@ Root `README.md` needs a full rewrite (currently documents the old "Rabbit Order
 - The Bruno collection in `bruno/` is run manually (Bruno CLI or GUI) against the running API to exercise: signup happy path + each validation failure, signin happy path + wrong password, `GET /api/orders` unauthenticated (401) and authenticated (200), `GET /api/health` (200, no auth).
 
 Frontend verification (browser walkthrough of sign-up → app page → orders table → logout) is deferred to the later frontend-integration pass, once Milestone 5 is actually built.
+
+---
+
+# Increment 2 — Email Verification + Podman Dockerization
+
+## Context
+
+The backend built in the pass above lets any freshly signed-up account log in immediately. The user wants a real email-verification gate — "the account shouldn't be active directly after signup" — modeled on a reference implementation they pointed at (`/home/mouse/projects/learning-be/ecommerce/`, a hand-rolled Express/Mongoose backend, NOT NestJS, but its design doc `docs/specs/auth-email-verification/initial-email-verification-decisions.md` and actual code are a deliberate blueprint to translate into our NestJS/Mongoose/Vitest stack). They also want the API itself containerized with **Podman**, using **Mongo 8** and **Mailpit** (a local SMTP-catcher with a web inbox), again mirroring that reference project's `Containerfile`/`compose.yaml` style but adapted for our pnpm/Turborepo monorepo layout (their repo is a flat single-package repo; ours is not, which changes the container build meaningfully).
+
+User-confirmed decisions:
+
+- **E2E tests stay hermetic**: mock `MailService` in e2e tests (no live Mailpit needed to run `pnpm test:e2e`), capturing the raw verification token straight from the mock's call args. Real end-to-end mail delivery is verified manually via Bruno + `podman compose up -d`, not by the automated suite.
+- **This is an intentional breaking API change**: `signup` stops returning an `accessToken` (returns `{user, message}` instead); `signin` now returns `403 EMAIL_NOT_VERIFIED` for unverified accounts; verifying email auto-logs-in by returning a token. All existing tests/Bruno requests touching signup/signin get updated accordingly.
+
+## Milestone 1 — Data model
+
+`apps/api/src/users/schemas/user.schema.ts`: add `@Prop({ type: Date, default: null }) emailVerifiedAt!: Date | null` — `null` = unverified, a `Date` = verified-at-that-time (not a boolean flag, matching the reference convention).
+
+**New file** `apps/api/src/auth/schemas/email-verification-token.schema.ts` (an `auth` concern, not `users` — `users/` has no schema-per-concern precedent to fight):
+
+```ts
+@Schema({ timestamps: true, collection: "emailVerificationTokens" })
+export class EmailVerificationToken {
+  @Prop({
+    type: MongooseSchema.Types.ObjectId,
+    ref: User.name,
+    required: true,
+    index: true,
+  })
+  userId!: Types.ObjectId
+
+  @Prop({ required: true, unique: true })
+  tokenHash!: string
+
+  @Prop({ type: Date, required: true, expires: 0 })
+  expiresAt!: Date
+
+  @Prop({ type: Date, default: null })
+  usedAt!: Date | null
+}
+```
+
+`expires: 0` on an absolute `expiresAt` Date creates a Mongo **TTL index** that expires exactly at the stored timestamp (distinct from the more common `expires: <seconds>` pattern on a `createdAt`-like field) — this is Mongoose's real TTL mechanism, not just a plain index. Skip the reference's generic soft-delete (`deletedAt`) — that's a repo-wide convention there we don't share; a token expiring/being marked used is enough here. Register the schema in `AuthModule`'s `MongooseModule.forFeature([...])` (new — `AuthModule` doesn't register any schema today).
+
+Add `UsersService.markEmailVerified(id): Promise<UserDocument | null>` — `findByIdAndUpdate(id, { emailVerifiedAt: new Date() }, { new: true })`.
+
+## Milestone 2 — Mail plumbing
+
+**New module** `apps/api/src/mail/`: `mail.module.ts` + `mail.service.ts`. `MailService` wraps `nodemailer.createTransport({ host: env.SMTP_HOST, port: env.SMTP_PORT, secure: false })` with one method `sendMail({ to, subject, text, html? }): Promise<void>`. New deps: `nodemailer`, `@types/nodemailer` (dev).
+
+**New file** `apps/api/src/auth/token.util.ts` — two pure functions, no class/DI needed (we have no refresh tokens, so no generalized `TokenService`):
+
+```ts
+export function generateVerificationToken(): string {
+  return randomBytes(48).toString("base64url") // raw token — NOT a JWT, NOT stored anywhere
+}
+export function hashVerificationToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex") // this is what gets persisted
+}
+```
+
+**New file** `apps/api/src/auth/email-verification.service.ts` — the architecture boundary the reference project calls out explicitly ("the auth module should not know Mailpit directly"): `AuthService` never touches nodemailer/crypto/the token schema, only this service does.
+
+```ts
+async createAndSendToken(user: { id: string; email: string }): Promise<void> {
+  const rawToken = generateVerificationToken()
+  const tokenHash = hashVerificationToken(rawToken)
+  await this.tokenModel.create({ userId: user.id, tokenHash, expiresAt: new Date(Date.now() + env.EMAIL_VERIFICATION_EXPIRES_IN_SECONDS * 1000) })
+  const url = new URL(env.EMAIL_VERIFICATION_URL)
+  url.searchParams.set("token", rawToken)
+  await this.mailService.sendMail({ to: user.email, subject: "Verify your email", text: `Verify your email: ${url}`, html: `<a href="${url}">Verify your email</a>` })
+}
+
+async consumeToken(rawToken: string): Promise<{ userId: string }> {
+  const tokenHash = hashVerificationToken(rawToken)
+  const doc = await this.tokenModel.findOne({ tokenHash, usedAt: null, expiresAt: { $gt: new Date() } }).exec()
+  if (!doc) throw new UnauthorizedException({ message: "Invalid or expired verification token", code: "INVALID_EMAIL_VERIFICATION_TOKEN" })
+  doc.usedAt = new Date()
+  await doc.save()
+  return { userId: doc.userId.toString() }
+}
+```
+
+Accepted scope cut: `consumeToken` + `UsersService.markEmailVerified` are two sequential writes, not a transaction (a standalone/non-replica-set Mongo can't do multi-doc transactions anyway; worst case of a crash between them is a used token whose user never got marked verified — recoverable via resend).
+
+`AuthModule` imports `MailModule`, provides `EmailVerificationService` (not exported — only `AuthService`/`AuthController` need it).
+
+## Milestone 3 — Auth logic changes
+
+**New DTOs** (`apps/api/src/auth/dto/`): `verify-email.dto.ts` (`token: string`, `@IsString() @Length(32, 500)`), `resend-verification-email.dto.ts` (`email: string`, `@IsEmail()`), `sign-up-response.dto.ts` (`{ user: { id, email, name }, message: string }` — replaces `AuthResponseDto` as signup's return type). Keep `AuthResponseDto` (`{accessToken}`) for `signin` and the new verify-email success response; add a small `MessageResponseDto` (`{message}`) for resend's Swagger doc.
+
+`AuthService` (`apps/api/src/auth/auth.service.ts`):
+
+- `signUp`: unchanged duplicate-check/bcrypt/create, then `await this.emailVerificationService.createAndSendToken({id, email})`, return `{ user: {id, email, name}, message: "Account created. Check your email to verify your account." }` — **no accessToken**.
+- `signIn`: unchanged lookup/bcrypt.compare, then before signing a token: `if (!user.emailVerifiedAt) throw new ForbiddenException({ message: "Please verify your email before signing in", code: "EMAIL_NOT_VERIFIED" })`.
+- New `verifyEmail(dto)`: `const {userId} = await this.emailVerificationService.consumeToken(dto.token)`, `const user = await this.usersService.markEmailVerified(userId)`, return `this.signToken(user.id, user.email)` — verifying doubles as auto-login via the existing `signToken` helper.
+- New `resendVerificationEmail(dto)`: find by email; if found AND unverified, `createAndSendToken`; **always** return the identical generic message `{ message: "If an unverified account exists, a verification email has been sent" }` regardless of whether the user exists or is already verified (anti-enumeration).
+
+`AuthController`: add `POST /api/auth/verify-email` and `POST /api/auth/resend-verification-email`, both `@HttpCode(HttpStatus.OK)`, both public (no `JwtAuthGuard`), both still covered by the controller-level `@UseGuards(ThrottlerGuard)` (no extra rate-limiting specifically on resend — the general throttler is enough, matching the reference's explicit scope cut).
+
+`HttpExceptionFilter` (`apps/api/src/common/filters/http-exception.filter.ts`): thread an optional `code` through non-destructively:
+
+```ts
+const code = exceptionResponse && typeof exceptionResponse === "object" ? (exceptionResponse as {code?: string}).code : undefined
+response.status(statusCode).json({ statusCode, message, ...(code ? { code } : {}), error: ..., path: ..., timestamp: ... })
+```
+
+Existing exceptions (`new ConflictException("...")` etc.) produce no `code` key today and keep producing none — only the two new throw sites populate it. No existing response shape changes.
+
+## Milestone 4 — Env vars
+
+`apps/api/src/config/env.validation.ts` — add to `server`, **all with sane defaults** (so e2e tests and anyone's `pnpm dev` without a `.env` don't start failing validation the moment this ships):
+
+```ts
+SMTP_HOST: z.string().min(1).default("localhost"),
+SMTP_PORT: z.coerce.number().int().positive().default(1025),
+SMTP_FROM: z.string().min(1).default("Order Listing <no-reply@order-listing.local>"),
+EMAIL_VERIFICATION_URL: z.string().min(1).default("http://localhost:3000/verify-email"),
+EMAIL_VERIFICATION_EXPIRES_IN_SECONDS: z.coerce.number().int().positive().default(86_400),
+```
+
+`apps/api/.env.example` gets the same five vars with `SMTP_HOST=localhost` (non-containerized `pnpm dev` hits Mailpit's host-published port `1025`). The containerized `api` service in `compose.yaml` uses `SMTP_HOST=mailpit` instead (service-name DNS) — two genuinely different configs, not a copy-paste.
+
+## Milestone 5 — Testing
+
+**Fix the 3 files that break:**
+
+- `auth.service.spec.ts`: add a mocked `EmailVerificationService` to the testing module providers. Update the `signUp` test to assert `{user, message}` (no token) and that `createAndSendToken` was called. Update the `signIn` "valid credentials" test's mock user to include `emailVerifiedAt: new Date()` (otherwise it now hits the new 403 branch). Add a new test: unverified `signIn` throws `ForbiddenException` with `code: "EMAIL_NOT_VERIFIED"`.
+- `users.service.integration-spec.ts`: not broken (new field defaults to `null`), but add an assertion that a fresh user has `emailVerifiedAt: null` and a new test for `markEmailVerified`.
+- `test/auth.e2e-spec.ts`: restructure — override `MailService` (`Test.createTestingModule({imports:[AppModule]}).overrideProvider(MailService).useValue({sendMail: vi.fn().mockResolvedValue(undefined)})`). Signup assertion changes to `{user, message}` + assert `sendMail` was called. Add: sign-in right after signup → 403 `EMAIL_NOT_VERIFIED`. Add: extract the raw token from the mock's last captured call (`mock.calls.at(-1)![0].text.match(/[?&]token=([^&\s]+)/)?.[1]`), POST `/api/auth/verify-email` → 200 + `accessToken`. Add: replay the same token → 401 `INVALID_EMAIL_VERIFICATION_TOKEN`. Move the existing "signs in with valid credentials" assertion to _after_ the verify-email step. Add: resend for a nonexistent email and for an already-verified email both return the byte-identical generic message; resend for a still-unverified user triggers a second `sendMail` call.
+
+**New unit tests:**
+
+- `apps/api/src/auth/email-verification.service.spec.ts` — mock the Mongoose `Model` (`create`/`findOne`) and `MailService`; verify `createAndSendToken` stores a _hash_ (never the raw token) and calls `sendMail` with a URL containing `?token=<raw>`; verify `consumeToken` throws for missing/expired/used tokens and succeeds + sets `usedAt` for a valid one.
+- `apps/api/src/auth/token.util.spec.ts` — sanity-check token length/charset and that hashing is deterministic and doesn't equal its input.
+
+Note on TTL index + tests: `mongodb-memory-server`'s TTL background monitor runs on its own ~60s interval and won't have purged expired docs within a test's lifetime — that's fine, `consumeToken`'s own `expiresAt: {$gt: new Date()}` query-time check is what tests actually validate; the TTL index is production hygiene, not a test dependency.
+
+## Milestone 6 — Podman dockerization
+
+Delete `apps/api/package.json`'s leftover `"deploy": "nest deploy"` script (unused `@nestjs/mau` cloud-deploy leftover from Nest CLI scaffolding — pnpm's own `pnpm deploy` CLI command takes precedence over same-named npm scripts so there's no functional collision, but it's confusing to leave in place).
+
+**New file** `apps/api/Containerfile`, built with **context: repo root** (the monorepo build needs `pnpm-workspace.yaml`, root `package.json`/`pnpm-lock.yaml`, and sibling `packages/*` that `apps/api`'s tsconfig/eslint extend):
+
+```dockerfile
+FROM docker.io/library/node:24-slim AS build
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages ./packages
+RUN pnpm install --filter=api... --frozen-lockfile
+COPY apps/api ./apps/api
+RUN pnpm --filter=api build
+RUN pnpm --filter=api deploy --prod /out/api
+
+FROM docker.io/library/node:24-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /out/api ./
+USER node
+EXPOSE 3001
+CMD ["node", "dist/main.js"]
+```
+
+Using `pnpm deploy` (not hand-rolled multi-`COPY node_modules`) because it's pnpm's purpose-built tool for producing a pruned, non-symlinked, standalone directory for one workspace package — correctly handling pnpm's content-addressable store, which manual copying would not. Two real constraints validated empirically (Podman is installed here — actually built it):
+
+- `pnpm deploy` does **not** run build scripts — `apps/api/dist` must exist before it runs (hence `build` before `deploy` above).
+- **File-selection gotcha**: `pnpm deploy`'s file selection follows the same ignore-pattern logic as `npm pack`; since root `.gitignore` lists `dist`, the default selection may exclude it even though it's freshly generated in the build stage. **Fix applied: `"files": ["dist"]` added to `apps/api/package.json`** — confirmed empirically that `dist/main.js` lands correctly in `/out/api/dist/`.
+- The deploy target must be an absolute path outside the workspace root (`/out/api`, not something under `/repo`) — a real pnpm constraint.
+
+**New file** repo-root `.dockerignore`: `node_modules`, `**/dist`, `**/.next`, `.turbo`, `coverage`, `.git`.
+
+**Replaced** `docker-compose.yml` with repo-root `compose.yaml`:
+
+```yaml
+services:
+  api:
+    build: { context: ., dockerfile: apps/api/Containerfile }
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      MONGODB_URI: mongodb://mongo:27017/order-listing
+      JWT_SECRET: change-me
+      JWT_EXPIRES_IN: 1h
+      CORS_ORIGIN: http://localhost:3000
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_FROM: "Order Listing <no-reply@order-listing.local>"
+      EMAIL_VERIFICATION_URL: http://localhost:3000/verify-email
+      EMAIL_VERIFICATION_EXPIRES_IN_SECONDS: "86400"
+    ports: ["3001:3001"]
+    depends_on: [mongo, mailpit]
+  mongo:
+    image: docker.io/library/mongo:8.0
+    restart: unless-stopped
+    ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+  mailpit:
+    image: docker.io/axllent/mailpit:v1.30
+    restart: unless-stopped
+    ports: ["1025:1025", "8025:8025"]
+volumes:
+  mongo-data:
+```
+
+Mongo bumped to **8.0** per the user's explicit ask (was 7). `podman compose up -d` (full stack) is the primary "run everything" workflow; `podman compose up -d mongo mailpit` + `pnpm --filter api dev` remains the fast-iteration path (both `podman-compose` 1.3.0 and `podman compose`'s external-provider mode confirmed working). Minor Podman notes, none requiring extra config: all ports are >1024 (no rootless privileged-port issue); the named `mongo-data` volume (not a bind-mount) avoids rootless UID-mapping permission issues; no healthchecks — `restart: unless-stopped` on `api` absorbs a brief crash-loop if it starts before Mongo is ready, acceptable for local/dev scope.
+
+## Milestone 7 — Diagrams, Bruno, README
+
+**Diagrams** (edited then re-rendered via `java -jar /home/mouse/sources/plantuml-lgpl-1.2026.5.jar <file>.puml`):
+
+- `ER-diagram.puml`: added `emailVerifiedAt : Date <<nullable>>` to `User`; new `EmailVerificationToken` entity (`_id`, `userId <<FK>>`, `tokenHash <<unique>>`, `expiresAt <<TTL>>`, `usedAt <<nullable>>`, `createdAt`, `updatedAt`); relationship `user ||--o{ emailVerificationToken`.
+- `sequence-diagram.puml`: Sign Up block gains token-generation/email-send steps and now ends in `201 { user, message }` (no token); new Verify Email block (valid/invalid `alt` branches); new Resend block (both branches converging on the identical response); Sign In block gains an `alt`/`else` for the unverified-403 case.
+- `class-diagram.puml`: new `mail` package (`MailService`, `MailModule`); `auth` package gains `EmailVerificationService`, `EmailVerificationToken`, `VerifyEmailDto`, `ResendVerificationEmailDto`, `SignUpResponseDto`; new associations for all of the above.
+
+**Bruno** (`bruno/Auth/`): new `Verify Email.bru` (`POST .../verify-email`, body `{"token": "{{verificationToken}}"}`, `script:post-response` capturing `accessToken`) and `Resend Verification Email.bru` (`POST .../resend-verification-email`, body `{"email": "{{signUpEmail}}"}`, no capture needed). `bruno/environments/Local.bru` gets a new `verificationToken: paste-token-from-mailpit-here` placeholder.
+
+**README**: added Mailpit UI URL, documented both run workflows (full `podman compose up -d` vs. mongo+mailpit-only + `pnpm dev`), replaced `docker compose`/`docker-compose.yml` mentions with `podman compose`/`compose.yaml`, listed the 5 new env vars, noted the breaking contract change, removed the deleted `deploy` script reference.
+
+## Verification
+
+- `pnpm --filter api test` (21 tests), `test:integration` (8 tests), `test:e2e` (23 tests) all pass — e2e mocks `MailService`, no live Mailpit needed.
+- `pnpm --filter api typecheck`/`lint` clean; root `pnpm lint` clean (root `pnpm typecheck` has one pre-existing, unrelated `apps/web` failure — `@testing-library/jest-dom` type augmentation — not touched by this work).
+- Manual flow verified via a real `podman compose up -d --build`: sign up → real email captured by Mailpit's HTTP API → sign-in returns 403 `EMAIL_NOT_VERIFIED` → verify-email with the real token returns 200 + `accessToken` → sign-in now succeeds (200) → replaying the same verify-email token returns 401 `INVALID_EMAIL_VERIFICATION_TOKEN`. All confirmed via curl against the live containerized stack.
+- `bru run` against the containerized stack exercises the same flow (Sign Up → Mailpit → paste token → Verify Email → Sign In → Resend) — confirmed passing end-to-end via the Bruno CLI.
+- All three `.puml` diagrams re-rendered cleanly via the local PlantUML jar.
+- `podman build -f apps/api/Containerfile .` succeeded; verified `dist/main.js` present in the deployed output and the container boots and serves `/api/health` correctly within the compose network.
+
+---
+
+# Increment 3 — Refresh Tokens + Full Session Payload
+
+## Context
+
+After Increment 2, `signin` and `verify-email` returned a bare `{ accessToken }`. That's not enough to build a frontend session: there's no refresh token (so a 15-minute access token means a hard logout every 15 minutes), and no user object (so the UI can't render the signed-in user's name without an extra `/auth/me` round trip). This increment makes those three endpoints return a complete session and adds token rotation, following NestJS's own JWT authentication docs plus the common `jwt-refresh` passport-strategy pattern.
+
+## Design
+
+**Two separate JWTs, two separate secrets.** Access tokens are signed with `JWT_ACCESS_SECRET` (default TTL `5m`, down from the old `1h` now that sessions can be refreshed); refresh tokens with `JWT_REFRESH_SECRET` (default `30d`). Distinct secrets mean an access token can never be replayed as a refresh token, or vice versa — verified by an e2e test.
+
+**Refresh tokens are persisted as hashes and rotated.** A new `refreshTokens` collection (`apps/api/src/auth/schemas/refresh-token.schema.ts`) stores `userId`, `tokenHash` (SHA-256, unique), `expiresAt` (TTL index mirroring the JWT's own `exp`), and `revokedAt`. `POST /api/auth/refresh` consumes the presented token (marks it revoked) and issues a fresh pair, so a stolen token stops working at the legitimate client's next refresh. Replay returns `401 INVALID_REFRESH_TOKEN`.
+
+A stateless JWT alone couldn't do this — persisting the hash is what makes refresh tokens revocable, which is also what makes `POST /api/auth/logout` meaningful.
+
+**Access tokens stay stateless — an explicit, accepted trade-off.** Logout revokes the refresh token but cannot invalidate an already-issued access token, because validating one never consults the database. This was raised as a bug after testing (`/api/orders` still returned 200 with a pre-logout token) and was reviewed as a design decision:
+
+- _Chosen:_ keep access-token validation fully stateless and bound the exposure with a short TTL (`JWT_ACCESS_EXPIRES_IN` `15m` → `5m`), with clients required to discard both tokens on logout. Every authenticated request stays free of a DB round trip.
+- _Rejected (for now):_ session-bound access tokens — a `sid` claim on the access token checked against its `refreshTokens` row on every request, giving instant per-device revocation at the cost of one indexed Mongo lookup per authenticated request. This is the upgrade path if instant revocation ever becomes a requirement.
+- _Rejected:_ a `jti` denylist collection — same per-request DB cost as the `sid` approach but more moving parts, and it only expresses explicit logout.
+
+The semantics are documented where someone will actually hit them: the `logout` endpoint's Swagger description, the README, the Bruno `Logout.bru` docs block, and a note on the sequence diagram.
+
+**`jti` claim.** Each refresh token carries a random `jti`. Found via a failing e2e test: without it, two sign-ins for the same user inside the same second produce byte-identical JWTs (identical payload, second-resolution `iat`) and collide on the unique `tokenHash` index — a real bug, not just a test artifact.
+
+**Session shape.** `signin`, `verify-email`, and `refresh` all return `AuthSessionDto`: `{ user: { id, email, name }, accessToken, refreshToken }`. `signup` deliberately still returns `{ user, message }` with no tokens — the email-verification gate from Increment 2 is unchanged.
+
+## Files
+
+- New: `refresh-token.service.ts` (issue/consume/revoke), `schemas/refresh-token.schema.ts`, `strategies/jwt-refresh.strategy.ts` (reads the token from the body via `ExtractJwt.fromBodyField`, `passReqToCallback` so the raw token reaches the service for hash lookup), `common/guards/jwt-refresh.guard.ts`, and DTOs `auth-session.dto.ts` / `user-summary.dto.ts` / `refresh-token.dto.ts`.
+- `token.util.ts`: `generateVerificationToken`/`hashVerificationToken` generalized to `generateOpaqueToken`/`hashToken`, now shared by email-verification and refresh tokens.
+- `auth.service.ts`: private `createSession(user)` used by all three session-returning paths; new `refresh()` and `logout()`.
+- Env renamed for clarity now that there are two token types: `JWT_SECRET`/`JWT_EXPIRES_IN` → `JWT_ACCESS_SECRET`/`JWT_ACCESS_EXPIRES_IN`, plus new `JWT_REFRESH_SECRET`/`JWT_REFRESH_EXPIRES_IN` (updated across `.env`, `.env.example`, `compose.yaml`, `turbo.json`, `vitest.setup.ts`, and the e2e specs).
+
+## Verification
+
+- 67 automated tests pass: 30 unit (incl. new `refresh-token.service.spec.ts` asserting only hashes are stored and rotation revokes), 8 integration, 29 e2e (rotation, replay rejection, cross-token rejection, logout revocation, and an access token minted from refresh working on a protected route).
+- `typecheck`/`lint` clean.
+- Manual run against a rebuilt `podman compose up -d --build` stack: signup → Mailpit → verify-email returns `{user, accessToken, refreshToken}` → refresh rotates both → new access token works on `/api/auth/me` → replaying the old refresh token 401s → logout then refresh 401s.
+- Bruno: `Sign In`/`Verify Email` capture both tokens; new `Refresh.bru` (re-captures the rotated pair) and `Logout.bru` confirmed 200 → 401-on-replay → 200 via the `bru` CLI.
+- All three `.puml` diagrams updated (new `RefreshToken` entity, refresh/logout sequences, new classes) and re-rendered.

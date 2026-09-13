@@ -1,0 +1,29 @@
+meta {
+  name: Logout
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{baseUrl}}/api/auth/logout
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "refreshToken": "{{refreshToken}}"
+  }
+}
+
+docs {
+  Revokes the stored refresh token, so the session can no longer be
+  extended — a subsequent Refresh returns 401.
+
+  Note: the access token is a stateless JWT and is NOT revoked here, so
+  "Me" and "List Orders" keep working with it until it expires on its own
+  (JWT_ACCESS_EXPIRES_IN, default 5m). That is deliberate — it keeps every
+  authenticated request free of a database lookup. Real clients discard
+  both tokens on logout; this collection keeps the stale one around only
+  so you can observe the behaviour.
+}

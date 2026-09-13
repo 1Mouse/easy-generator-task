@@ -28,6 +28,7 @@ test-results
 out/
 build
 dist
+*.tsbuildinfo
 
 
 # Debug

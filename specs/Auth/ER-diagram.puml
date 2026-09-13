@@ -11,6 +11,29 @@ entity "User" as user {
   * email : string <<unique, lowercase, trim, indexed>>
   * name : string
   * passwordHash : string
+  * emailVerifiedAt : Date <<nullable>>
+  * createdAt : Date
+  * updatedAt : Date
+}
+
+entity "RefreshToken" as rt {
+  * _id : ObjectId <<PK>>
+  --
+  * userId : ObjectId <<FK>>
+  * tokenHash : string <<unique, indexed>>
+  * expiresAt : Date <<TTL index, expireAfterSeconds: 0>>
+  * revokedAt : Date <<nullable>>
+  * createdAt : Date
+  * updatedAt : Date
+}
+
+entity "EmailVerificationToken" as evt {
+  * _id : ObjectId <<PK>>
+  --
+  * userId : ObjectId <<FK>>
+  * tokenHash : string <<unique, indexed>>
+  * expiresAt : Date <<TTL index, expireAfterSeconds: 0>>
+  * usedAt : Date <<nullable>>
   * createdAt : Date
   * updatedAt : Date
 }
@@ -30,6 +53,19 @@ note right of user
   Password is never stored or
   returned in plaintext — only
   a bcrypt hash (passwordHash).
+  emailVerifiedAt null = unverified;
+  a Date = verified at that time.
+  Login is rejected while null.
+end note
+
+note right of evt
+  Collection: "emailVerificationTokens"
+  Only the SHA-256 hash of the raw
+  token is stored — the raw token
+  only ever exists in the email sent
+  to the user. Single-use (usedAt)
+  and time-limited (TTL index on
+  expiresAt auto-purges the doc).
 end note
 
 note right of order
@@ -43,6 +79,18 @@ note right of order
   authenticated user may list them.
 end note
 
+note right of rt
+  Collection: "refreshTokens"
+  Stores only SHA-256(JWT). Rotated
+  on every /auth/refresh: the presented
+  token is marked revokedAt and a new
+  row is written, so a stolen token dies
+  at the legitimate client's next refresh.
+  Logout revokes without re-issuing.
+end note
+
 user ..> order : "authenticated access\n(no ownership FK)"
+user ||--o{ evt : "has many"
+user ||--o{ rt : "has many (one per session)"
 
 @enduml

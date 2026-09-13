@@ -1,0 +1,26 @@
+# Build context: repo root (this app lives inside a pnpm workspace and needs
+# pnpm-workspace.yaml / the root lockfile / sibling packages/* it extends).
+FROM docker.io/library/node:24-slim AS build
+WORKDIR /repo
+RUN corepack enable
+
+# Manifests first for layer caching. pnpm needs every workspace member's
+# package.json present to resolve the graph, even though --filter only
+# installs api's own dependencies.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages ./packages
+RUN pnpm install --filter=api... --frozen-lockfile
+
+COPY apps/api ./apps/api
+RUN pnpm --filter=api build
+RUN pnpm --filter=api deploy --prod /out/api
+
+FROM docker.io/library/node:24-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /out/api ./
+USER node
+EXPOSE 5000
+CMD ["node", "dist/main.js"]

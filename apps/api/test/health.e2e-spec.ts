@@ -12,7 +12,8 @@ describe("Health (e2e)", () => {
   beforeAll(async () => {
     mongod = await MongoMemoryServer.create()
     process.env.MONGODB_URI = mongod.getUri()
-    process.env.JWT_SECRET ??= "test-secret"
+    process.env.JWT_ACCESS_SECRET ??= "test-access-secret"
+    process.env.JWT_REFRESH_SECRET ??= "test-refresh-secret"
 
     // Deferred until after MONGODB_URI is set — env.validation.ts reads
     // process.env eagerly the moment this module (and its AppModule chain)

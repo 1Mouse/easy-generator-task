@@ -1,0 +1,23 @@
+meta {
+  name: Resend Verification Email
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/api/auth/resend-verification-email
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "{{signUpEmail}}"
+  }
+}
+
+docs {
+  Always returns the same generic message, whether or not the email
+  belongs to an existing/unverified account (anti-enumeration). Check
+  Mailpit for a new email only if the account was genuinely unverified.
+}

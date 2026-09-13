@@ -27,4 +27,10 @@ export class UsersService {
   create(input: CreateUserInput): Promise<UserDocument> {
     return this.userModel.create(input)
   }
+
+  markEmailVerified(id: string): Promise<UserDocument | null> {
+    return this.userModel
+      .findByIdAndUpdate(id, { emailVerifiedAt: new Date() }, { new: true })
+      .exec()
+  }
 }

@@ -1,0 +1,36 @@
+meta {
+  name: Refresh
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{baseUrl}}/api/auth/refresh
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "refreshToken": "{{refreshToken}}"
+  }
+}
+
+script:post-response {
+  const body = res.getBody();
+
+  if (body?.accessToken) {
+    bru.setEnvVar("accessToken", body.accessToken);
+  }
+
+  if (body?.refreshToken) {
+    bru.setEnvVar("refreshToken", body.refreshToken);
+  }
+}
+
+docs {
+  Exchanges the stored refresh token for a fresh access/refresh pair and
+  captures both back into the environment. Rotation is enforced: running
+  this twice with the same token returns 401 INVALID_REFRESH_TOKEN, since
+  the first call revokes the token it consumed.
+}

@@ -6,18 +6,66 @@ left to right direction
 
 package "auth" {
   class AuthController {
-    +signUp(dto: SignUpDto): Promise<{accessToken}>
-    +signIn(dto: SignInDto): Promise<{accessToken}>
-    +me(user: CurrentUser): Promise<UserProfile>
+    +signUp(dto: SignUpDto): Promise<SignUpResponseDto>
+    +signIn(dto: SignInDto): Promise<AuthSessionDto>
+    +verifyEmail(dto: VerifyEmailDto): Promise<AuthSessionDto>
+    +refresh(dto: RefreshTokenDto, req): Promise<AuthSessionDto>
+    +logout(dto: RefreshTokenDto): Promise<MessageResponseDto>
+    +resendVerificationEmail(dto: ResendVerificationEmailDto): Promise<MessageResponseDto>
+    +me(user: CurrentUser): Promise<UserSummaryDto>
   }
 
   class AuthService {
     -usersService: UsersService
     -jwtService: JwtService
-    +signUp(dto: SignUpDto): Promise<{accessToken}>
-    +signIn(dto: SignInDto): Promise<{accessToken}>
-    -hashPassword(plain: string): Promise<string>
-    -comparePassword(plain: string, hash: string): Promise<boolean>
+    -emailVerificationService: EmailVerificationService
+    -refreshTokenService: RefreshTokenService
+    +signUp(dto: SignUpDto): Promise<SignUpResponseDto>
+    +signIn(dto: SignInDto): Promise<AuthSessionDto>
+    +verifyEmail(dto: VerifyEmailDto): Promise<AuthSessionDto>
+    +refresh(userId, refreshToken): Promise<AuthSessionDto>
+    +logout(dto: RefreshTokenDto): Promise<{message}>
+    +resendVerificationEmail(dto): Promise<{message}>
+    -createSession(user): Promise<AuthSessionDto>
+    -toUserSummary(user): UserSummaryDto
+  }
+
+  class RefreshTokenService {
+    -tokenModel: Model<RefreshTokenDocument>
+    -jwtService: JwtService
+    +issue(user: {id, email}): Promise<string>
+    +consume(userId, token): Promise<void>
+    +revoke(token): Promise<void>
+    -expiryOf(token): Date
+  }
+
+  class RefreshToken {
+    +userId: ObjectId
+    +tokenHash: string
+    +expiresAt: Date
+    +revokedAt: Date | null
+  }
+
+  class JwtRefreshStrategy {
+    +validate(req, payload): {userId, email, refreshToken}
+  }
+
+  class JwtRefreshGuard {
+    +canActivate(context): boolean
+  }
+
+  class EmailVerificationService {
+    -tokenModel: Model<EmailVerificationTokenDocument>
+    -mailService: MailService
+    +createAndSendToken(user: {id, email}): Promise<void>
+    +consumeToken(rawToken: string): Promise<{userId}>
+  }
+
+  class EmailVerificationToken {
+    +userId: ObjectId
+    +tokenHash: string
+    +expiresAt: Date
+    +usedAt: Date | null
   }
 
   class SignUpDto {
@@ -31,6 +79,39 @@ package "auth" {
     +password: string
   }
 
+  class VerifyEmailDto {
+    +token: string
+  }
+
+  class RefreshTokenDto {
+    +refreshToken: string
+  }
+
+  class AuthSessionDto {
+    +user: UserSummaryDto
+    +accessToken: string
+    +refreshToken: string
+  }
+
+  class UserSummaryDto {
+    +id: string
+    +email: string
+    +name: string
+  }
+
+  class ResendVerificationEmailDto {
+    +email: string
+  }
+
+  class SignUpResponseDto {
+    +user: {id, email, name}
+    +message: string
+  }
+
+  class MessageResponseDto {
+    +message: string
+  }
+
   class JwtStrategy {
     +validate(payload: JwtPayload): {userId, email}
   }
@@ -39,20 +120,37 @@ package "auth" {
     +canActivate(context): boolean
   }
 
+  class "token.util" as TokenUtil <<functions>> {
+    +generateVerificationToken(): string
+    +hashVerificationToken(token): string
+  }
+
   class AuthModule
+}
+
+package "mail" {
+  class MailService {
+    -transporter: Transporter
+    +sendMail(input: {to, subject, text, html?}): Promise<void>
+  }
+
+  class MailModule
 }
 
 package "users" {
   class UsersService {
     -userModel: Model<UserDocument>
     +findByEmail(email: string): Promise<UserDocument | null>
+    +findById(id: string): Promise<UserDocument | null>
     +create(data): Promise<UserDocument>
+    +markEmailVerified(id: string): Promise<UserDocument | null>
   }
 
   class UserSchema {
     +email: string
     +name: string
     +passwordHash: string
+    +emailVerifiedAt: Date | null
   }
 
   class UsersModule
@@ -117,16 +215,45 @@ AppModule --> HealthController
 AuthModule --> AuthController
 AuthModule --> AuthService
 AuthModule --> JwtStrategy
+AuthModule --> JwtRefreshStrategy
 AuthModule --> JwtAuthGuard
+AuthModule --> EmailVerificationService
+AuthModule --> RefreshTokenService
+AuthModule --> EmailVerificationToken
+AuthModule --> RefreshToken
 AuthModule ..> UsersModule : imports
+AuthModule ..> MailModule : imports
 
 AuthController --> SignUpDto
 AuthController --> SignInDto
+AuthController --> VerifyEmailDto
+AuthController --> ResendVerificationEmailDto
+AuthController --> SignUpResponseDto
+AuthController --> MessageResponseDto
 AuthController --> AuthService
 AuthController ..> CurrentUserDecorator
 
+AuthController --> RefreshTokenDto
+AuthController --> AuthSessionDto
+AuthController ..> JwtRefreshGuard : @UseGuards (refresh, logout)
+
 AuthService --> UsersService
+AuthService --> EmailVerificationService
+AuthService --> RefreshTokenService
+AuthService --> AuthSessionDto
+AuthSessionDto --> UserSummaryDto
+SignUpResponseDto --> UserSummaryDto
 JwtStrategy ..> UsersService : validates against
+JwtRefreshGuard ..> JwtRefreshStrategy : "jwt-refresh"
+
+EmailVerificationService --> EmailVerificationToken
+EmailVerificationService --> MailService
+EmailVerificationService ..> TokenUtil : uses
+
+RefreshTokenService --> RefreshToken
+RefreshTokenService ..> TokenUtil : hashToken
+
+MailModule --> MailService
 
 UsersModule --> UsersService
 UsersService --> UserSchema
