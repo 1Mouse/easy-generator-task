@@ -40,3 +40,6 @@ lefthook-local.yml
 # Misc
 .DS_Store
 *.pem
+
+# Playwright auth state
+playwright/.auth

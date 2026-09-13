@@ -1,11 +1,49 @@
 {
   "extends": ["//"],
   "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": ["NEXT_PUBLIC_APP_URL", "API_URL", "NODE_ENV"]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "env": ["NEXT_PUBLIC_APP_URL", "API_URL", "NODE_ENV"],
+      "inputs": ["$TURBO_DEFAULT$", ".env*"],
+      "outputs": [".next/**", "!.next/cache/**"]
+    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "env": ["NEXT_PUBLIC_APP_URL"],
+      "env": ["NEXT_PUBLIC_APP_URL", "API_URL", "NODE_ENV"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/types/**", ".next/dev/types/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"],
+      "env": ["NEXT_PUBLIC_APP_URL", "API_URL", "NODE_ENV"]
+    },
+    "test:e2e": {
+      "cache": false,
+      "env": [
+        "NEXT_PUBLIC_APP_URL",
+        "API_URL",
+        "MAILPIT_URL",
+        "PLAYWRIGHT_BASE_URL",
+        "CI",
+        "PORT"
+      ]
+    },
+    "test:e2e:ui": {
+      "cache": false,
+      "env": [
+        "NEXT_PUBLIC_APP_URL",
+        "API_URL",
+        "MAILPIT_URL",
+        "PLAYWRIGHT_BASE_URL",
+        "CI",
+        "PORT"
+      ],
+      "persistent": true
     }
   }
 }

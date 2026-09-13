@@ -142,6 +142,53 @@ pnpm format        # Prettier with Tailwind plugin
 pnpm typecheck     # TypeScript strict mode
 ```
 
+## Auth in the web app (`apps/web`)
+
+Sign up, sign in, sign out, email verification, and silent token rotation, built on the API above.
+
+### How the session is held
+
+Tokens live in **httpOnly cookies** and never touch client JavaScript. The browser talks only to this app's own `/api/auth/*` route handlers, which proxy to the API and own every cookie write — a BFF. That's why the login response body contains just `{ user }`: the tokens went into `Set-Cookie`.
+
+| Concern            | Where it lives                                 | Why there                                                                                                                                                                                              |
+| ------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cookie writes      | `app/api/auth/*` route handlers, Server Action | The only places Next allows setting cookies                                                                                                                                                            |
+| Silent rotation    | `proxy.ts`                                     | A server component **cannot** set cookies while rendering, so it could rotate a refresh token and never persist it — burning the session. Proxy writes to both the forwarded request and the response. |
+| Route protection   | `proxy.ts`                                     | Redirects to `/login?next=…`, and bounces signed-in users away from the auth pages                                                                                                                     |
+| Email verification | `app/(auth)/verify-email` + a Server Action    | Consuming a single-use token is a mutation that must set cookies; a POST also keeps the token away from email scanners and link prefetchers that follow GET links                                      |
+| Client state       | TanStack Query (`useSession`, auth mutations)  | Mutations invalidate the `session` key, so the UI follows the session automatically                                                                                                                    |
+
+`proxy.ts` is the Next 16 replacement for `middleware.ts` (same feature, renamed).
+
+### Forms
+
+TanStack Form + Zod via a small composable wrapper (`components/form`). `useAppForm` returns a form whose fields already know the app's components, so a screen just declares what it collects:
+
+```tsx
+<form.AppField name="email">{(f) => <f.TextField label="Email" />}</form.AppField>
+<form.AppForm><form.SubmitButton label="Sign in" /></form.AppForm>
+```
+
+Errors split by cause: **field-level problems render under the field** (caught by the Zod schema before any request), while **server errors that aren't tied to a field** — bad credentials, unverified account, duplicate email — surface as a **toast**. The Zod schemas in `features/auth/schemas.ts` mirror the API's password policy so users get feedback without a round trip; the API still enforces it.
+
+### Running it
+
+```bash
+podman compose up -d          # API + mongo + mailpit
+pnpm --filter api seed
+pnpm --filter web dev         # → http://localhost:3000
+```
+
+`apps/web/.env.local` needs `API_URL=http://localhost:5000` (server-only — the browser never sees it).
+
+### Browser tests
+
+```bash
+pnpm --filter web test:e2e
+```
+
+Playwright runs three projects: a `setup` project that creates a real verified account (driving the actual sign-up and verification screens, reading the token out of Mailpit) and saves its session; `anonymous` for the signed-out auth screens; and `authenticated` for `/orders`, reusing that saved session. These need the API stack running, since `/orders` is now genuinely protected.
+
 ## Backend API (`apps/api`)
 
 A NestJS + MongoDB backend providing authentication with email verification (sign up → verify via emailed link → sign in → JWT) and a protected, paginated orders endpoint. Mail is sent over SMTP to [Mailpit](https://github.com/axllent/mailpit) locally (a fake mailbox with a web inbox — nothing is ever really emailed). See `specs/Auth/initial-plan.md` for the full design (ER diagram, sequence diagram, class diagram — all under `specs/Auth/*.puml`).

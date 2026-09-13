@@ -1,8 +1,14 @@
+import path from "node:path"
 import { defineConfig, devices } from "@playwright/test"
 
 const isCI = !!process.env.CI
 const appPort = process.env.PORT ?? "3000"
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${appPort}`
+
+const authStatePath = path.join(
+  import.meta.dirname,
+  "playwright/.auth/user.json"
+)
 
 const webServer = process.env.PLAYWRIGHT_BASE_URL
   ? undefined
@@ -27,9 +33,19 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   projects: [
+    // Creates a verified account once and stores its session for reuse.
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
     {
-      name: "chromium",
+      // Signed out: the auth screens bounce anyone who already has a session.
+      name: "anonymous",
+      testMatch: /auth\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "authenticated",
+      testIgnore: /auth\.(spec|setup)\.ts/,
+      use: { ...devices["Desktop Chrome"], storageState: authStatePath },
+      dependencies: ["setup"],
     },
   ],
   ...(webServer ? { webServer } : {}),
