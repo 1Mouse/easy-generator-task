@@ -16,6 +16,9 @@ describe("Orders (e2e)", () => {
     process.env.MONGODB_URI = mongod.getUri()
     process.env.JWT_ACCESS_SECRET ??= "test-access-secret"
     process.env.JWT_REFRESH_SECRET ??= "test-refresh-secret"
+    // This suite exercises auth behaviour, not rate limiting — keep the
+    // limiter out of the way so unrelated tests can't trip it.
+    process.env.THROTTLE_LIMIT = "1000"
 
     const { AppModule } = await import("../src/app.module.js")
     const { Order } = await import("../src/orders/schemas/order.schema.js")

@@ -42,7 +42,9 @@ import { JwtStrategy } from "./strategies/jwt.strategy.js"
       // validated-but-freeform env string (e.g. "5m"), so it needs a cast here.
       signOptions: { expiresIn: env.JWT_ACCESS_EXPIRES_IN as never },
     }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 10 }]),
+    ThrottlerModule.forRoot([
+      { ttl: env.THROTTLE_TTL_MS, limit: env.THROTTLE_LIMIT },
+    ]),
   ],
   controllers: [AuthController],
   providers: [

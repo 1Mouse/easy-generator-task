@@ -12,7 +12,9 @@
         "JWT_REFRESH_SECRET",
         "JWT_REFRESH_EXPIRES_IN",
         "PORT",
-        "CORS_ORIGIN"
+        "CORS_ORIGIN",
+        "THROTTLE_LIMIT",
+        "THROTTLE_TTL_MS"
       ]
     },
     "build": {

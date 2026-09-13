@@ -15,6 +15,9 @@ describe("Auth (e2e)", () => {
     process.env.MONGODB_URI = mongod.getUri()
     process.env.JWT_ACCESS_SECRET ??= "test-access-secret"
     process.env.JWT_REFRESH_SECRET ??= "test-refresh-secret"
+    // This suite exercises auth behaviour, not rate limiting — keep the
+    // limiter out of the way so unrelated tests can't trip it.
+    process.env.THROTTLE_LIMIT = "1000"
 
     const { AppModule } = await import("../src/app.module.js")
     const { MailService } = await import("../src/mail/mail.service.js")
@@ -251,6 +254,28 @@ describe("Auth (e2e)", () => {
       )
     })
 
+    it("sends a token that actually completes verification", async () => {
+      const resendEmail = "resend-then-verify@example.com"
+      await request(app.getHttpServer()).post("/api/auth/signup").send({
+        email: resendEmail,
+        name: "Resend Verify",
+        password: "Str0ng!Pass",
+      })
+
+      mockMailService.sendMail.mockClear()
+      await request(app.getHttpServer())
+        .post("/api/auth/resend-verification-email")
+        .send({ email: resendEmail })
+
+      const response = await request(app.getHttpServer())
+        .post("/api/auth/verify-email")
+        .send({ token: extractTokenForEmail(resendEmail) })
+
+      expect(response.status).toBe(200)
+      expect(typeof response.body.accessToken).toBe("string")
+      expect(response.body.user.email).toBe(resendEmail)
+    })
+
     it("returns the identical generic message for a nonexistent email and an already-verified email", async () => {
       const nonexistentResponse = await request(app.getHttpServer())
         .post("/api/auth/resend-verification-email")
@@ -263,6 +288,44 @@ describe("Auth (e2e)", () => {
       expect(nonexistentResponse.status).toBe(200)
       expect(alreadyVerifiedResponse.status).toBe(200)
       expect(nonexistentResponse.body).toEqual(alreadyVerifiedResponse.body)
+    })
+  })
+
+  // The schema lowercases `email` on write, so every lookup path has to agree
+  // on casing or users get duplicate accounts / can't sign back in.
+  describe("email casing", () => {
+    const mixedCase = "MixedCase@Example.COM"
+    const lowered = mixedCase.toLowerCase()
+
+    it("stores the address lowercased on signup", async () => {
+      const response = await request(app.getHttpServer())
+        .post("/api/auth/signup")
+        .send({ email: mixedCase, name: "Mixed Case", password: "Str0ng!Pass" })
+
+      expect(response.status).toBe(201)
+      expect(response.body.user.email).toBe(lowered)
+    })
+
+    it("treats a differently-cased address as a duplicate", async () => {
+      const response = await request(app.getHttpServer())
+        .post("/api/auth/signup")
+        .send({ email: lowered, name: "Mixed Case", password: "Str0ng!Pass" })
+
+      expect(response.status).toBe(409)
+    })
+
+    it("verifies and signs in regardless of the casing used", async () => {
+      const verify = await request(app.getHttpServer())
+        .post("/api/auth/verify-email")
+        .send({ token: extractTokenForEmail(lowered) })
+      expect(verify.status).toBe(200)
+
+      const response = await request(app.getHttpServer())
+        .post("/api/auth/signin")
+        .send({ email: "MIXEDCASE@example.com", password: "Str0ng!Pass" })
+
+      expect(response.status).toBe(200)
+      expect(response.body.user.email).toBe(lowered)
     })
   })
 

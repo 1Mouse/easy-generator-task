@@ -13,6 +13,9 @@ export const env = createEnv({
     JWT_REFRESH_SECRET: z.string().min(1),
     JWT_REFRESH_EXPIRES_IN: z.string().min(1).default("30d"),
     CORS_ORIGIN: z.string().min(1).default("http://localhost:3000"),
+    // Rate limit applied to the auth controller (per client, per endpoint).
+    THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
+    THROTTLE_LIMIT: z.coerce.number().int().positive().default(10),
     SMTP_HOST: z.string().min(1).default("localhost"),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),
     SMTP_FROM: z
