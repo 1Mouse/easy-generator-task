@@ -45,6 +45,11 @@
       "cache": false,
       "env": ["NEXT_PUBLIC_APP_URL"],
       "persistent": true
+    },
+    "start": {
+      "cache": false,
+      "env": ["API_URL", "NEXT_PUBLIC_APP_URL"],
+      "persistent": true
     }
   }
 }

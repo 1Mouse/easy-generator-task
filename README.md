@@ -83,6 +83,32 @@ orderly/
 └── compose.yaml                           # api + mongo + mailpit
 ```
 
+## Demo
+
+The whole flow, in the order you'd hit it.
+
+**Landing → sign up.** The form validates with Zod before anything leaves the browser; the API re-enforces the same password policy independently.
+
+![Landing page](demo-screenshots/landing.png)
+
+![Sign-up form](demo-screenshots/orderly-signup.png)
+
+**Account created — but inert.** Sign-up returns no tokens. You get a toast and an "Almost there" panel, and that's as far as you can go until the email is opened. (Also the theme toggle: the app is fully light/dark.)
+
+![Signed up, awaiting verification](demo-screenshots/email-verification.png)
+
+**The email lands in Mailpit**, never on the real internet. The link carries an opaque single-use token — only its SHA-256 hash is stored server-side.
+
+![Verification email in Mailpit](demo-screenshots/mailpit-email-verification.png)
+
+**Verified → straight into the protected table.** Verifying consumes the token and starts the session in one step, so you land on `/orders` already signed in. The 118 rows come from `GET /api/orders`, which returns 401 without a valid access token — the header shows the signed-in user and the sign-out button that revokes the refresh token server-side.
+
+![Protected orders table](demo-screenshots/protected-view-and-signout.png)
+
+**A dead link fails gracefully.** Expired, already-used, or tampered tokens all land here rather than on a stack trace or a blank 404, with a resend form inline. The resend response is identical whether or not the address exists, so it can't be used to enumerate accounts.
+
+![Expired or used verification link](demo-screenshots/wrong-email-verification-token.png)
+
 ## Backend architecture (`apps/api`)
 
 A standard NestJS module graph — `AuthModule`, `UsersModule`, `OrdersModule`, `MailModule` — with the API as the sole authority on identity. Every token it issues, it verifies.
