@@ -113,6 +113,10 @@ The whole flow, in the order you'd hit it.
 
 A standard NestJS module graph — `AuthModule`, `UsersModule`, `OrdersModule`, `MailModule` — with the API as the sole authority on identity. Every token it issues, it verifies.
 
+![Entity relationship diagram of the MongoDB collections](specs/Auth/ER-diagram.png)
+
+*The four MongoDB collections. `users` owns its `emailVerificationTokens` and `refreshTokens` (one per session). Both token collections store only SHA-256 hashes and expire through TTL indexes. `orders` has no user foreign key: any authenticated user can list them.*
+
 **Two token types, two secrets.** Access tokens (`JWT_ACCESS_SECRET`, 5 min) and refresh tokens (`JWT_REFRESH_SECRET`, 30 days) are separate JWTs signed with separate secrets, so one can never be replayed as the other — there's an e2e test asserting exactly that.
 
 **Refresh tokens are stateful; access tokens aren't.** Refresh tokens are persisted as a SHA-256 hash in a TTL-indexed `refreshTokens` collection. That's what makes them revocable, and it's what `/auth/refresh` uses to enforce **rotation**: the presented token is consumed and a new pair issued, so a stolen token stops working the moment the real client next refreshes. Replaying a rotated or logged-out token returns `401 INVALID_REFRESH_TOKEN`.
