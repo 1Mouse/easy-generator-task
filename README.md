@@ -1,319 +1,263 @@
-# Rabbit Orders
+# Orderly
 
-A responsive order management interface built with Next.js 16, featuring a data table with search, filtering, sorting, pagination, and a mobile-optimized card layout. Includes light/dark mode support.
+A full-stack **authentication sandbox**. The interesting part is the auth: email-verified sign-up, JWT access/refresh tokens with rotation, and httpOnly-cookie sessions. Order management is the payload — a realistic protected resource to point the session at, so "is this endpoint actually guarded?" has a concrete answer you can click through instead of a `curl` against a toy `/private` route.
 
-UI is accurately crafted to match rabbit identity with a modern neo-brutalism design.
-
-**Live Demo:** [rabbit-orders-web.vercel.app](https://rabbit-orders-web.vercel.app/)
-
-![Rabbit Orders screenshot](./Screenshot_20260322_205347.png)
-![Rabbit Orders mobile screenshot](./Screenshot_20260322_205727.png)
-
-## Getting Started
-
-```bash
-# Prerequisites: Node.js >= 20, pnpm >= 9
-
-# Install dependencies
-pnpm install
-
-# Start development server
-pnpm dev
-
-# Open http://localhost:3000/orders
-```
-
-## Project Structure
-
-This is a **pnpm monorepo** managed with [Turborepo](https://turbo.build):
+Every auth edge you'd normally hand-wave is wired up and exercised: an unverified account can't sign in, a verification link works exactly once, an expired access token refreshes silently mid-navigation, a rotated refresh token is dead on replay, and signing out revokes server-side.
 
 ```
-order-listing/
+Browser ──► Next.js (apps/web) ───────────────► NestJS API (apps/api) ──► MongoDB
+          │  • renders UI                    │   • issues + verifies JWTs
+          │  • BFF: /api/auth/* route         │   • owns users, tokens, orders
+          │    handlers hold the tokens       └─► Mailpit (SMTP, local inbox)
+          │  • proxy.ts rotates expired
+          │    access tokens per request
+          └── tokens live in httpOnly cookies; client JS never sees one
+```
+
+The browser never talks to the API directly. It talks to Next, which holds the tokens in httpOnly cookies and forwards to the API — a backend-for-frontend. That single decision explains most of the frontend architecture below.
+
+## Tech stack
+
+| Layer         | Choice                                                      |
+| ------------- | ----------------------------------------------------------- |
+| Monorepo      | Turborepo + pnpm workspaces                                 |
+| Backend       | NestJS 12, Mongoose 8, MongoDB 8                            |
+| Auth          | `@nestjs/jwt` + Passport (`jwt`, `jwt-refresh`), bcryptjs   |
+| Mail          | Nodemailer → Mailpit (local SMTP catcher with a web inbox)  |
+| Frontend      | Next.js 16 (App Router, RSC, Server Actions), React 19      |
+| Data fetching | TanStack Query                                              |
+| Forms         | TanStack Form + Zod                                         |
+| UI            | Tailwind CSS 4, Base UI, CVA, TanStack Table, nuqs          |
+| Validation    | class-validator (API) · Zod (web + env)                     |
+| Env safety    | `@t3-oss/env-core` / `env-nextjs`, fail-fast at boot        |
+| API docs      | Swagger at `/api/docs`                                      |
+| Testing       | Vitest (unit/integration/e2e), Supertest, Playwright, Bruno |
+| Containers    | Podman (Docker-compatible), `compose.yaml`                  |
+
+## Project structure
+
+```
+orderly/
 ├── apps/
-│   └── web/                          # Next.js 16 application
-│       ├── app/                      # App Router pages
-│       │   └── orders/page.tsx       # Orders page (server component)
-│       ├── components/
-│       │   └── data-table/           # Reusable data table system
+│   ├── api/                              # NestJS API — the authority on identity
+│   │   ├── src/
+│   │   │   ├── auth/                     # Everything credential-shaped
+│   │   │   │   ├── auth.controller.ts    #   signup, signin, verify-email, refresh, logout, me
+│   │   │   │   ├── auth.service.ts       #   orchestration + createSession()
+│   │   │   │   ├── email-verification.service.ts   # issue/consume verification tokens
+│   │   │   │   ├── refresh-token.service.ts        # issue/consume/revoke, rotation
+│   │   │   │   ├── token.util.ts         #   opaque token generation + SHA-256 hashing
+│   │   │   │   ├── dto/                  #   class-validator request/response contracts
+│   │   │   │   ├── schemas/              #   emailVerificationTokens, refreshTokens (TTL-indexed)
+│   │   │   │   └── strategies/           #   jwt (access) + jwt-refresh, separate secrets
+│   │   │   ├── users/                    # User schema + lookups (emailVerifiedAt lives here)
+│   │   │   ├── orders/                   # The protected resource: schema, service, guarded controller
+│   │   │   ├── mail/                     # Nodemailer wrapper — auth never touches SMTP directly
+│   │   │   ├── common/                   # Guards, exception filter, logging interceptor, password policy
+│   │   │   ├── config/                   # Zod-validated env, .env loader
+│   │   │   ├── seed/                     # 118 deterministic orders
+│   │   │   └── main.ts                   # helmet, compression, CORS, global pipe/prefix, Swagger
+│   │   ├── test/                         # e2e specs (auth, orders, health, throttler)
+│   │   └── Containerfile                 # Multi-stage build via `pnpm deploy`
+│   │
+│   └── web/                              # Next.js front end — the BFF
+│       ├── proxy.ts                      # Route guard + silent refresh rotation (Next 16's middleware)
+│       ├── app/
+│       │   ├── api/auth/*/route.ts       # BFF endpoints; the only place cookies are written
+│       │   ├── (auth)/                   # login, signup, verify-email (+ shared shell)
+│       │   └── orders/                   # Protected page, server-rendered from the API
 │       ├── features/
-│       │   └── orders/               # Order feature module
-│       │       ├── model.ts          # Types & constants
-│       │       ├── query-state.ts    # URL query param parsers
-│       │       ├── server/           # Server-side data & mock generation
-│       │       └── ui/               # UI components & config
-│       ├── e2e/                      # Playwright E2E tests
-│       ├── env.ts                    # Type-safe env vars (t3-env + Zod)
-│       ├── hooks/                    # Shared React hooks
-│       └── providers/                # App-level providers
+│       │   ├── auth/                     # model, zod schemas, server/, client/, hooks/, ui/
+│       │   └── orders/                   # model, query-state, server/, ui/
+│       ├── components/form/              # Composable TanStack Form wrapper (useAppForm)
+│       ├── lib/api-error.ts              # Normalizes the API's error envelope
+│       └── e2e/                          # Playwright: auth setup project + specs
+│
 ├── packages/
-│   ├── ui/                           # Shared component library (Base UI + CVA)
-│   ├── eslint-config/                # Shared ESLint configuration
-│   └── typescript-config/            # Shared TypeScript configuration
-├── turbo.json                        # Turborepo task pipeline
-└── pnpm-workspace.yaml              # Workspace definition
+│   ├── ui/                               # Shared components (Base UI + CVA)
+│   ├── eslint-config/ · typescript-config/
+│
+├── bruno/                                # API collection for manual testing
+├── specs/Auth/                            # Design record + ER/sequence/class diagrams (.puml)
+├── dev-guide/setup/containers.md          # Container setup in depth
+└── compose.yaml                           # api + mongo + mailpit
 ```
 
-### Architecture Decisions
+## Backend architecture (`apps/api`)
 
-**Feature-based organization** — Order-related code lives in `features/orders/` rather than being spread across generic `components/`, `hooks/`, `utils/` directories. Each feature module contains its own model, query state, server logic, and UI components.
+A standard NestJS module graph — `AuthModule`, `UsersModule`, `OrdersModule`, `MailModule` — with the API as the sole authority on identity. Every token it issues, it verifies.
 
-**Reusable data table** — The `components/data-table/` system is generic and decoupled from the orders feature. It accepts configuration objects for search, filters, sort, and pagination — making it reusable for any entity.
+**Two token types, two secrets.** Access tokens (`JWT_ACCESS_SECRET`, 5 min) and refresh tokens (`JWT_REFRESH_SECRET`, 30 days) are separate JWTs signed with separate secrets, so one can never be replayed as the other — there's an e2e test asserting exactly that.
 
-**Server-side rendering** — The orders page is a React Server Component. Data filtering, sorting, and pagination happen on the server via `listOrders()`. The client only handles URL state management through [nuqs](https://nuqs.47ng.com).
+**Refresh tokens are stateful; access tokens aren't.** Refresh tokens are persisted as a SHA-256 hash in a TTL-indexed `refreshTokens` collection. That's what makes them revocable, and it's what `/auth/refresh` uses to enforce **rotation**: the presented token is consumed and a new pair issued, so a stolen token stops working the moment the real client next refreshes. Replaying a rotated or logged-out token returns `401 INVALID_REFRESH_TOKEN`.
 
-**URL-driven state** — All table state (search, status filter, sort direction, page) is stored in URL query parameters via nuqs. This means every view is bookmarkable, shareable, and works with browser back/forward navigation.
+Access tokens are deliberately left stateless — validating one never touches the database, which keeps every authenticated request free of a round trip. The trade-off is that **logout can't invalidate an already-issued access token**; it stays valid until it expires, which is why the TTL is short and clients must discard both tokens. (The upgrade path, if instant revocation is ever needed: a `sid` claim checked against the token's `refreshTokens` row.)
 
-## Features Implemented
+**Email verification gates the account.** Sign-up creates a user with `emailVerifiedAt: null` and returns **no tokens** — the account is inert until the emailed link is opened. Sign-in on an unverified account returns `403 EMAIL_NOT_VERIFIED`. Verification tokens are opaque random strings (not JWTs), stored only as a SHA-256 hash, single-use, and TTL-expiring; verifying consumes the token and starts the session. `resend-verification-email` always returns the same generic message so it can't be used to enumerate accounts.
 
-### Core Requirements
+**Layering.** `AuthService` never touches SMTP, crypto, or token schemas — `EmailVerificationService` and `RefreshTokenService` own those, and `MailService` wraps Nodemailer. Cross-cutting concerns sit in `common/`: a global exception filter producing one consistent error envelope (with an optional machine-readable `code`), a logging interceptor, JWT guards, and the shared password policy. Config is Zod-validated at boot, so a missing secret fails immediately rather than at first request.
 
-| Requirement                                              | Implementation                                               |
-| -------------------------------------------------------- | ------------------------------------------------------------ |
-| Order table with ID, Customer, Status, Items, Created At | `order-table-columns.tsx` with TanStack Table                |
-| Status filter dropdown                                   | `data-table-toolbar.tsx` with status selector                |
-| Responsive design                                        | Desktop table + mobile card layout (`order-mobile-card.tsx`) |
-| Static mock data source                                  | `mock-orders.ts` generates 118 deterministic orders          |
-| Alternating row colors                                   | Striped rows via `index % 2` conditional styling             |
-| Empty state message                                      | `data-table-empty-state.tsx` — "No orders found"             |
-| Clean, maintainable code                                 | Feature modules, typed props, no `any` leaks                 |
+Rate limiting (`@nestjs/throttler`) covers the auth controller, configurable via `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`.
 
-### Bonus Features
+## Frontend architecture (`apps/web`)
 
-| Feature              | Implementation                                                |
-| -------------------- | ------------------------------------------------------------- |
-| Search by name or ID | Debounced search input (500ms) in toolbar                     |
-| Sort by date         | Toggle button cycling between "Newest first" / "Oldest first" |
-| Light/dark mode      | `ThemeToggle` component using `next-themes`                   |
+Built around one constraint: **tokens must never reach client JavaScript.** So the browser only ever calls this app's own `/api/auth/*` route handlers, which proxy to the API and own every cookie write. The login response body is just `{ user }` — the tokens went into `Set-Cookie`.
 
-### Additional Enhancements
+The second constraint shapes the rest: **a server component cannot set cookies while rendering.** That single fact decides where three things live.
 
-- **Pagination** — Page navigation with ellipsis for large page counts, "Showing X-Y of Z" indicator
-- **Type-safe environment variables** — `@t3-oss/env-nextjs` with Zod validation
-- **Shared UI library** — `@workspace/ui` package with Base UI + CVA components
-- **Mobile card layout** — Responsive cards below `md` breakpoint, table above
-- **SEO & Social sharing** — Full OpenGraph and Twitter Card meta tags with a dynamically generated OG image (`opengraph-image.tsx`) rendered at the edge using `next/og`
+| Concern            | Where                                 | Why there                                                                                                                                                                              |
+| ------------------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cookie writes      | Route handlers + a Server Action      | The only places Next permits it                                                                                                                                                        |
+| Silent rotation    | `proxy.ts`                            | A page could rotate a refresh token and then fail to persist it — burning the session. Proxy writes to the forwarded request _and_ the response, so the same render sees the new token |
+| Route protection   | `proxy.ts`                            | Redirects to `/login?next=…`; bounces signed-in users off the auth pages                                                                                                               |
+| Email verification | `(auth)/verify-email` + Server Action | Consuming a single-use token is a mutation that must set cookies. A POST also keeps the token away from email scanners and prefetchers that follow GET links                           |
+| Session state      | TanStack Query                        | `useSession` reads `/api/auth/me`; auth mutations invalidate the key so the UI follows the session                                                                                     |
 
-## Tech Stack
+> `proxy.ts` is Next 16's rename of `middleware.ts` — same feature, and it now defaults to the Node runtime.
 
-| Layer          | Technology                         |
-| -------------- | ---------------------------------- |
-| Framework      | Next.js 16 (App Router, React 19)  |
-| Language       | TypeScript 5.9                     |
-| Styling        | Tailwind CSS 4                     |
-| UI Components  | Base UI + Class Variance Authority |
-| Data Table     | TanStack React Table v8            |
-| URL State      | nuqs v2                            |
-| Theme          | next-themes                        |
-| Env Validation | @t3-oss/env-nextjs + Zod           |
-| Build System   | Turborepo + pnpm workspaces        |
-| CI             | GitHub Actions                     |
-| Deployment     | Vercel                             |
+**Feature modules.** `features/auth/` splits into `model` / `schemas` / `server` / `client` / `hooks` / `ui`, so the server-only surface (cookies, API calls, actions) is physically separate from anything that ships to the browser. `features/orders/` follows the same shape.
 
-## Quality Standards
-
-### Type Safety
-
-- Strict TypeScript across the entire codebase
-- Type-safe environment variables validated at build time with Zod
-- Type-safe URL query parameters via nuqs parsers with defaults
-- Input normalization (`normalizeOrderListQuery`) clamps and validates all query params
-
-### Code Organization
-
-- Feature modules encapsulate related model, state, server logic, and UI
-- Shared UI components live in a separate workspace package
-- Data table system is config-driven and entity-agnostic
-- Formatters are pure functions extracted for testability
-
-### CI/CD
-
-**GitHub Actions** (`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests:
-
-1. **checks** job — lint, typecheck, and unit/component tests
-2. **e2e** job (depends on checks) — builds the app, installs Chromium, runs Playwright tests. On failure, uploads Playwright report and test results as artifacts.
-
-**Vercel** handles production deployments automatically on push to `main`, with preview deployments for pull requests.
-
-### Linting & Formatting
-
-```bash
-pnpm lint          # ESLint across all packages
-pnpm format        # Prettier with Tailwind plugin
-pnpm typecheck     # TypeScript strict mode
-```
-
-## Auth in the web app (`apps/web`)
-
-Sign up, sign in, sign out, email verification, and silent token rotation, built on the API above.
-
-### How the session is held
-
-Tokens live in **httpOnly cookies** and never touch client JavaScript. The browser talks only to this app's own `/api/auth/*` route handlers, which proxy to the API and own every cookie write — a BFF. That's why the login response body contains just `{ user }`: the tokens went into `Set-Cookie`.
-
-| Concern            | Where it lives                                 | Why there                                                                                                                                                                                              |
-| ------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Cookie writes      | `app/api/auth/*` route handlers, Server Action | The only places Next allows setting cookies                                                                                                                                                            |
-| Silent rotation    | `proxy.ts`                                     | A server component **cannot** set cookies while rendering, so it could rotate a refresh token and never persist it — burning the session. Proxy writes to both the forwarded request and the response. |
-| Route protection   | `proxy.ts`                                     | Redirects to `/login?next=…`, and bounces signed-in users away from the auth pages                                                                                                                     |
-| Email verification | `app/(auth)/verify-email` + a Server Action    | Consuming a single-use token is a mutation that must set cookies; a POST also keeps the token away from email scanners and link prefetchers that follow GET links                                      |
-| Client state       | TanStack Query (`useSession`, auth mutations)  | Mutations invalidate the `session` key, so the UI follows the session automatically                                                                                                                    |
-
-`proxy.ts` is the Next 16 replacement for `middleware.ts` (same feature, renamed).
-
-### Forms
-
-TanStack Form + Zod via a small composable wrapper (`components/form`). `useAppForm` returns a form whose fields already know the app's components, so a screen just declares what it collects:
+**Forms** use TanStack Form + Zod behind a small composable wrapper (`components/form`). `useAppForm` returns a form whose fields already know the app's components:
 
 ```tsx
 <form.AppField name="email">{(f) => <f.TextField label="Email" />}</form.AppField>
 <form.AppForm><form.SubmitButton label="Sign in" /></form.AppForm>
 ```
 
-Errors split by cause: **field-level problems render under the field** (caught by the Zod schema before any request), while **server errors that aren't tied to a field** — bad credentials, unverified account, duplicate email — surface as a **toast**. The Zod schemas in `features/auth/schemas.ts` mirror the API's password policy so users get feedback without a round trip; the API still enforces it.
+Errors are split by cause: **field-level problems render under the field** (caught by the Zod schema before any request goes out), while **server errors that aren't tied to a field** — bad credentials, unverified account, duplicate email — surface as a **toast**. The web Zod schemas mirror the API's password policy so users get instant feedback; the API still enforces it independently.
 
-### Running it
+## Getting started
 
-```bash
-podman compose up -d          # API + mongo + mailpit
-pnpm --filter api seed
-pnpm --filter web dev         # → http://localhost:3000
-```
-
-`apps/web/.env.local` needs `API_URL=http://localhost:5000` (server-only — the browser never sees it).
-
-### Browser tests
+**Prerequisites:** Node.js ≥ 20, pnpm 9, and Podman (or Docker).
 
 ```bash
-pnpm --filter web test:e2e
+pnpm install
+cp apps/api/.env.example apps/api/.env
+
+cat > apps/web/.env.local <<'EOF'
+API_URL=http://localhost:5000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+EOF
 ```
 
-Playwright runs three projects: a `setup` project that creates a real verified account (driving the actual sign-up and verification screens, reading the token out of Mailpit) and saves its session; `anonymous` for the signed-out auth screens; and `authenticated` for `/orders`, reusing that saved session. These need the API stack running, since `/orders` is now genuinely protected.
+`API_URL` is deliberately **server-only** — the browser never sees it, because it never calls the API directly.
 
-## Backend API (`apps/api`)
+### 1. Start the backing services
 
-A NestJS + MongoDB backend providing authentication with email verification (sign up → verify via emailed link → sign in → JWT) and a protected, paginated orders endpoint. Mail is sent over SMTP to [Mailpit](https://github.com/axllent/mailpit) locally (a fake mailbox with a web inbox — nothing is ever really emailed). See `specs/Auth/initial-plan.md` for the full design (ER diagram, sequence diagram, class diagram — all under `specs/Auth/*.puml`).
-
-### Running it
+Podman is the primary tool here; every command works with Docker by swapping the binary name.
 
 ```bash
-podman compose up -d --build   # full stack: api + mongo:8.0 + mailpit
-pnpm --filter api seed         # populate the orders collection
-# → http://localhost:5000/api        (REST endpoints, prefixed with /api)
-# → http://localhost:5000/api/docs   (Swagger UI)
-# → http://localhost:8025            (Mailpit inbox — read verification emails here)
+podman compose up -d              # api + mongo:8 + mailpit
+pnpm --filter api seed            # 118 orders into MongoDB
 ```
 
-Podman is the primary tool this repo is set up for (Docker works too — see below). For the fast-iteration workflow (containers for dependencies only, API running on the host with hot reload), the full container build/`Containerfile` design rationale, `.containerignore` vs `.dockerignore`, and Docker-equivalent commands, see **[`dev-guide/setup/containers.md`](dev-guide/setup/containers.md)**.
+| Service       | URL                            |
+| ------------- | ------------------------------ |
+| API           | http://localhost:5000/api      |
+| Swagger       | http://localhost:5000/api/docs |
+| Mailpit inbox | http://localhost:8025          |
+| MongoDB       | localhost:27017                |
 
-### Endpoints
+Mailpit catches every outgoing email — **nothing is ever really sent**. Open its inbox to read verification links.
 
-| Method | Path                                  | Auth          | Description                                                                        |
-| ------ | ------------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
-| POST   | `/api/auth/signup`                    | Public        | Create an account (unverified), sends a verification email — **returns no tokens** |
-| POST   | `/api/auth/verify-email`              | Public        | Verify with the emailed token — activates the account and **starts a session**     |
-| POST   | `/api/auth/resend-verification-email` | Public        | Resend the verification email (always returns the same generic message)            |
-| POST   | `/api/auth/signin`                    | Public        | Sign in — **403 `EMAIL_NOT_VERIFIED` until verified**                              |
-| POST   | `/api/auth/refresh`                   | Refresh token | Rotate: exchange a refresh token for a brand new access/refresh pair               |
-| POST   | `/api/auth/logout`                    | Refresh token | Revoke the presented refresh token                                                 |
-| GET    | `/api/auth/me`                        | Bearer JWT    | Current authenticated user                                                         |
-| GET    | `/api/orders`                         | Bearer JWT    | Paginated/filterable/sortable orders                                               |
-| GET    | `/api/health`                         | Public        | Liveness check                                                                     |
+### 2. Start the front end
 
-**Session payload.** `signin`, `verify-email`, and `refresh` all return the same shape, so the frontend can store the session and render the user's name without a follow-up request:
+```bash
+pnpm --filter web dev             # → http://localhost:3000
+```
+
+### Iterating on the API
+
+To run the API on the host with hot reload instead of in a container, start only its dependencies:
+
+```bash
+podman compose up -d mongo mailpit
+pnpm --filter api dev
+```
+
+Tear everything down with `podman compose down -v` (`-v` also drops the Mongo volume). Full container details — why `Containerfile` and `.containerignore`, how the monorepo build works — are in [`dev-guide/setup/containers.md`](dev-guide/setup/containers.md).
+
+### Walking through the auth flow
+
+1. Open http://localhost:3000/signup and create an account.
+2. Try signing in — you'll get **403, email not verified**.
+3. Open http://localhost:8025, click the verification link in the email.
+4. You land on `/orders`, signed in, reading real data from the protected endpoint.
+5. Sign out; `/orders` bounces you back to `/login`.
+
+## API reference
+
+| Method | Path                                  | Auth          | Description                                                             |
+| ------ | ------------------------------------- | ------------- | ----------------------------------------------------------------------- |
+| POST   | `/api/auth/signup`                    | Public        | Create an unverified account, send a verification email — **no tokens** |
+| POST   | `/api/auth/verify-email`              | Public        | Consume the emailed token, activate the account, **start a session**    |
+| POST   | `/api/auth/resend-verification-email` | Public        | Always returns the same generic message                                 |
+| POST   | `/api/auth/signin`                    | Public        | **403 `EMAIL_NOT_VERIFIED`** until verified                             |
+| POST   | `/api/auth/refresh`                   | Refresh token | Rotate: consume the token, issue a fresh pair                           |
+| POST   | `/api/auth/logout`                    | Refresh token | Revoke the refresh token                                                |
+| GET    | `/api/auth/me`                        | Bearer JWT    | Current user                                                            |
+| GET    | `/api/orders`                         | Bearer JWT    | **The protected resource** — paginated, filterable, sortable            |
+| GET    | `/api/health`                         | Public        | Liveness                                                                |
+
+`signin`, `verify-email`, and `refresh` all return the same session shape, so the client can store it and render the user without a follow-up request:
 
 ```jsonc
 {
   "user": { "id": "…", "email": "jane@example.com", "name": "Jane Doe" },
-  "accessToken": "…", // short-lived (JWT_ACCESS_EXPIRES_IN, default 5m) — send as `Authorization: Bearer`
-  "refreshToken": "…", // long-lived (JWT_REFRESH_EXPIRES_IN, default 30d) — POST to /api/auth/refresh
+  "accessToken": "…", // short-lived, Authorization: Bearer
+  "refreshToken": "…", // long-lived, POST to /api/auth/refresh
 }
 ```
 
-**Token design.** Access and refresh tokens are separate JWTs signed with **separate secrets**, so one can never be used in the other's place. Refresh tokens are additionally persisted as a SHA-256 hash in a `refreshTokens` collection, which makes them revocable and lets `/api/auth/refresh` do **rotation**: the presented token is consumed (revoked) and a new pair issued, so a stolen token stops working the moment the legitimate client next refreshes. Replaying a rotated or logged-out token returns `401 INVALID_REFRESH_TOKEN`.
+Sign-up validation: valid email, name ≥ 3 chars, password ≥ 8 chars with at least one letter, one digit, and one special character.
 
-**What logout does and doesn't do.** Logout revokes the refresh token, so the session can't be extended. The access token is intentionally left **stateless** — validating it never touches the database, which keeps every authenticated request free of a DB round trip. The trade-off is that an access token issued before logout stays valid until it expires on its own; the TTL is deliberately short (`5m`) to bound that window, and **clients must discard both tokens on logout** so it's never sent again. If you ever need instant server-side revocation instead, the shape to add is a `sid` claim on the access token checked against its `refreshTokens` row — at the cost of one indexed lookup per request.
+### Environment variables
 
-Sign-up validation: email format, name ≥ 3 chars, password ≥ 8 chars with at least one letter, one digit, and one special character — enforced via `class-validator` DTOs. Email-verification tokens are single-use, opaque (not JWTs), SHA-256-hashed at rest, and expire after `EMAIL_VERIFICATION_EXPIRES_IN_SECONDS` (default 24h).
+| Variable                                   | Default                              | Notes                               |
+| ------------------------------------------ | ------------------------------------ | ----------------------------------- |
+| `MONGODB_URI`                              | —                                    | Required                            |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | —                                    | Required, and must differ           |
+| `JWT_ACCESS_EXPIRES_IN`                    | `5m`                                 | Short by design (see logout caveat) |
+| `JWT_REFRESH_EXPIRES_IN`                   | `30d`                                |                                     |
+| `EMAIL_VERIFICATION_URL`                   | `http://localhost:3000/verify-email` | Front-end link placed in the email  |
+| `EMAIL_VERIFICATION_EXPIRES_IN_SECONDS`    | `86400`                              |                                     |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_FROM`    | `localhost` / `1025`                 | `mailpit` as host inside compose    |
+| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`       | `60000` / `10`                       | Auth rate limit                     |
+| `CORS_ORIGIN`                              | `http://localhost:3000`              |                                     |
+| `API_URL` (web)                            | `http://localhost:5000`              | Server-only                         |
 
-### Testing it manually — Bruno
-
-A Bruno collection lives in `bruno/` (open the folder in the Bruno app, or run headlessly):
+## Testing
 
 ```bash
-cd bruno
-bru run --env Local
+pnpm --filter api test              # unit — mocked dependencies
+pnpm --filter api test:integration  # real Mongoose + Nest DI on mongodb-memory-server
+pnpm --filter api test:e2e          # full HTTP via Supertest
+pnpm --filter web test              # component/unit (Vitest + Testing Library)
+pnpm --filter web test:e2e          # Playwright, real browser
 ```
 
-`baseUrl` is a collection variable (`bruno/collection.bru`), so individual requests work even without selecting an environment; `--env Local` is still needed for the auth flow's test inputs (`signUpEmail`, etc.) and for `accessToken`/`refreshToken`/`verificationToken`, which the request scripts populate at runtime.
+Every API tier is **hermetic**: `mongodb-memory-server` supplies a real ephemeral MongoDB and `MailService` is mocked, so no running container is needed. Coverage deliberately includes the things that quietly rot — token expiry (proved by backdating stored rows, so the `expiresAt` guards can't be removed unnoticed), refresh rotation and replay, rate limiting, and email casing.
 
-Run "Sign Up", then open Mailpit at `http://localhost:8025`, copy the token out of the verification link, paste it into the `verificationToken` environment variable, then run "Verify Email" — its `post-response` script captures both `accessToken` and `refreshToken` into the environment, so "Me", "List Orders", "Refresh", and "Logout" all work straight afterwards. (The verification token is the one thing that can't be script-captured, since it only ever exists inside an email.) "Refresh" re-captures the rotated pair each time it runs.
+The Playwright suite runs three projects: a `setup` project that creates a genuinely verified account by driving the real sign-up and verification screens (reading the token out of Mailpit) and saves the session, an `anonymous` project for the signed-out auth screens, and an `authenticated` project for `/orders`. Because `/orders` is truly protected, these need the API stack running.
 
-### Automated tests
+### Manual API testing
+
+A [Bruno](https://usebruno.com) collection lives in `bruno/`:
 
 ```bash
-pnpm --filter api test              # unit tests (mocked dependencies)
-pnpm --filter api test:integration  # real Mongoose + Nest DI against mongodb-memory-server
-pnpm --filter api test:e2e          # full HTTP flow (supertest) against mongodb-memory-server
+cd bruno && bru run --env Local
 ```
 
-All three tiers are hermetic — `mongodb-memory-server` spins up its own ephemeral MongoDB and `MailService` is mocked (the raw verification token is captured straight from the mock's call arguments), so no live Mongo, Mailpit, or Podman is needed to run the suite.
+`baseUrl` is a collection variable, so single requests work without selecting an environment. Run **Sign Up**, grab the token from Mailpit, paste it into `verificationToken`, then run **Verify Email** — its script captures `accessToken` and `refreshToken` for the protected requests that follow.
 
-## Test Suite
+## Design record
 
-Three layers of testing cover the application from pure logic through component rendering to full browser interactions.
+`specs/Auth/` holds the design decisions and diagrams (`.puml` sources rendered to PNG): an ER diagram of the collections, a sequence diagram covering sign-up through refresh and logout, and a class diagram of the NestJS modules.
 
-### Unit Tests (Vitest)
-
-Pure function tests with no React rendering required:
+## Quality checks
 
 ```bash
-pnpm test          # Run all unit + component tests (single run)
-pnpm test:watch    # Watch mode for development
-```
-
-| Test File                  | What It Covers                                                                      | Tests |
-| -------------------------- | ----------------------------------------------------------------------------------- | ----- |
-| `query-state.test.ts`      | `normalizeOrderListQuery` — page clamping, pageSize bounds, search trimming         | 8     |
-| `order-formatters.test.ts` | `formatOrderDate` locale formatting, `formatOrderItemsSummary` truncation           | 5     |
-| `list-orders.test.ts`      | `listOrders` — filtering by status/search, sorting asc/desc, pagination, edge cases | 10    |
-
-### Component Tests (Vitest + React Testing Library)
-
-Render tests verifying component behavior through the DOM:
-
-| Test File                         | What It Covers                                               | Tests |
-| --------------------------------- | ------------------------------------------------------------ | ----- |
-| `order-status-badge.test.tsx`     | Renders correct text for all 4 statuses                      | 4     |
-| `data-table-empty-state.test.tsx` | Renders title, description, and icon from config             | 1     |
-| `data-table-pagination.test.tsx`  | Page buttons, disabled states, navigation calls, entity name | 6     |
-
-### E2E Tests (Playwright)
-
-Full browser tests against the running application:
-
-```bash
-pnpm test:e2e      # Headless Chromium
-pnpm test:e2e:ui   # Interactive Playwright UI
-```
-
-| Test                            | What It Verifies                                      |
-| ------------------------------- | ----------------------------------------------------- |
-| Loads and displays orders table | Page renders, heading visible, table rows present     |
-| Search filters results          | Typing a non-match shows empty state                  |
-| Search clears and restores      | Clearing input brings back the full table             |
-| Status filter narrows results   | Selecting "New" shows only New-status badges          |
-| Sort toggles                    | Button cycles between "Newest first" / "Oldest first" |
-| Pagination navigates            | Clicking page 2 updates URL and content               |
-
-### Running All Tests
-
-```bash
-# Unit + component tests
-pnpm test
-
-# E2E tests (starts dev server automatically)
-pnpm test:e2e
-
-# Everything via Turborepo
-pnpm test && pnpm test:e2e
+pnpm lint          # ESLint across all packages
+pnpm typecheck     # TypeScript strict mode
+pnpm format        # Prettier
 ```

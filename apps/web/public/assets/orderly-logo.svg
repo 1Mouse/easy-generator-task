@@ -1,0 +1,6 @@
+<svg width="96" height="96" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Orderly">
+  <rect width="96" height="96" fill="#184a33"/>
+  <!-- The O is drawn as a ring rather than set as text so it renders identically
+       everywhere, with no dependency on a font being available. -->
+  <circle cx="48" cy="48" r="26" stroke="#dbfd52" stroke-width="12"/>
+</svg>

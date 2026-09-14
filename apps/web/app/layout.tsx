@@ -7,8 +7,6 @@ import { ThemeToggle } from "@/components/theme-toggle"
 import { env } from "@/env"
 import { cn } from "@workspace/ui/lib/utils"
 
-const siteImagePath = "/assets/rabbit-logo.png"
-
 const fontSans = DM_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
@@ -20,29 +18,25 @@ const fontMono = Space_Mono({
   variable: "--font-mono",
 })
 
+const description = "Manage and track customer orders — calm, ordered, Orderly."
+
 export const metadata: Metadata = {
   title: {
-    default: "Rabbit Orders",
-    template: "%s | Rabbit Orders",
+    default: "Orderly",
+    template: "%s | Orderly",
   },
-  description:
-    "Manage and track customer orders — Rabbit, your household reliable friend.",
+  description,
   metadataBase: new URL(env.NEXT_PUBLIC_APP_URL),
   openGraph: {
-    title: "Rabbit Orders",
-    description:
-      "Manage and track customer orders — Rabbit, your household reliable friend.",
+    title: "Orderly",
+    description,
     type: "website",
-    images: [
-      {
-        url: siteImagePath,
-        alt: "Rabbit Orders logo",
-      },
-    ],
+    // No explicit `images` here on purpose: `opengraph-image.tsx` generates the
+    // social card, and Next wires it up automatically. Pointing these at the
+    // SVG logo instead would break previews — most scrapers reject SVG.
   },
   twitter: {
     card: "summary_large_image",
-    images: [siteImagePath],
   },
 }
 

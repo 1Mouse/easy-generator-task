@@ -2,7 +2,7 @@ import { ImageResponse } from "next/og"
 
 export const runtime = "edge"
 
-export const alt = "Rabbit Orders"
+export const alt = "Orderly"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
@@ -27,21 +27,16 @@ export default function OGImage() {
           gap: 16,
         }}
       >
+        {/* The ring mark, drawn with a border so it matches the SVG logo
+            without relying on font rendering inside the OG image. */}
         <div
           style={{
             width: 80,
             height: 80,
-            backgroundColor: "#dbfd52",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 52,
-            fontWeight: 900,
-            color: "#184a33",
+            borderRadius: 80,
+            border: "16px solid #dbfd52",
           }}
-        >
-          R
-        </div>
+        />
         <span
           style={{
             fontSize: 72,
@@ -50,7 +45,7 @@ export default function OGImage() {
             letterSpacing: "-2px",
           }}
         >
-          rabbit
+          Orderly
         </span>
       </div>
       <span

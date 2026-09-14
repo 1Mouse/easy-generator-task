@@ -1,5 +1,6 @@
-import Image from "next/image"
 import Link from "next/link"
+
+import { Logo } from "@/components/brand/logo"
 
 export default function AuthLayout({
   children,
@@ -8,15 +9,8 @@ export default function AuthLayout({
 }) {
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-6 p-6">
-      <Link href="/" aria-label="Home">
-        <Image
-          src="/assets/rabbit-logo.png"
-          alt="Rabbit"
-          width={160}
-          height={40}
-          priority
-          className="h-auto not-dark:bg-primary"
-        />
+      <Link href="/" aria-label="Orderly home">
+        <Logo />
       </Link>
       {children}
     </main>
